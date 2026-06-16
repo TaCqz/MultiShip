@@ -42,8 +42,10 @@ COPY --from=build /src/build/MultiShipCLI /MultiShipCLI
 # ---- runtime stage (default) ------------------------------------------------
 FROM ubuntu:22.04 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
+# Runtime shared libs the binary links against. libspdlog1 pulls in libfmt8;
+# SDL2/SDL2_net are needed for the networking. (nlohmann-json is header-only.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libsdl2-2.0-0 libsdl2-net-2.0-0 \
+        libsdl2-2.0-0 libsdl2-net-2.0-0 libspdlog1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/build/MultiShipCLI /usr/local/bin/MultiShipCLI

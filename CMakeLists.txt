@@ -23,6 +23,12 @@ add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/MP>)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/Zc:preprocessor>)
 
+# The desktop GUI server pulls in Dear ImGui + SDL_Renderer. Headless/server
+# builds (Linux deployments, the Docker image) can turn it off and build only the
+# CLI, which then needs neither ImGui nor a network fetch at configure time:
+#   cmake -S . -B build -DMULTISHIP_BUILD_GUI=OFF
+option(MULTISHIP_BUILD_GUI "Build the ImGui desktop GUI server in addition to the CLI" ON)
+
 # ------------------------------------------------------------------------------
 # Dependencies via vcpkg (same bootstrap helper and static triplet as the parent)
 # ------------------------------------------------------------------------------
@@ -45,70 +51,79 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
 endif()
 
 find_package(SDL2 CONFIG REQUIRED)
-find_package(SDL2_net CONFIG REQUIRED)
+# SDL2_net: prefer its CMake config (vcpkg, and SDL2_net >= 2.2.0). Older distro
+# packages (e.g. Ubuntu 22.04's SDL2_net 2.0.1) ship no config, so fall back to
+# pkg-config and expose the same SDL2_net::SDL2_net target the rest of this file
+# links against.
+find_package(SDL2_net CONFIG QUIET)
+if(NOT TARGET SDL2_net::SDL2_net AND NOT TARGET SDL2_net::SDL2_net-static)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SDL2_NET REQUIRED IMPORTED_TARGET SDL2_net)
+    add_library(SDL2_net::SDL2_net ALIAS PkgConfig::SDL2_NET)
+endif()
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 
-# ------------------------------------------------------------------------------
-# Dear ImGui (pinned) + SDL2 / SDL_Renderer backends, built as a static lib.
-# ------------------------------------------------------------------------------
-include(FetchContent)
-FetchContent_Declare(
-    imgui
-    GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG v1.91.8
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(imgui)
-
-# Resolve the SDL2 include directory so the imgui SDL2 backend can find SDL.h.
+# Resolve the SDL2 target name (static on the vcpkg triplet, shared on most
+# distros). Needed by the CLI always, and by the GUI when enabled.
 if(TARGET SDL2::SDL2-static)
     set(MULTISHIP_SDL2_TARGET SDL2::SDL2-static)
 elseif(TARGET SDL2::SDL2)
     set(MULTISHIP_SDL2_TARGET SDL2::SDL2)
 endif()
 
-add_library(imgui_sdl2 STATIC
-    ${imgui_SOURCE_DIR}/imgui.cpp
-    ${imgui_SOURCE_DIR}/imgui_draw.cpp
-    ${imgui_SOURCE_DIR}/imgui_tables.cpp
-    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer2.cpp
-)
-target_include_directories(imgui_sdl2 PUBLIC
-    ${imgui_SOURCE_DIR}
-    ${imgui_SOURCE_DIR}/backends
-)
-target_link_libraries(imgui_sdl2 PUBLIC ${MULTISHIP_SDL2_TARGET})
-
 # ------------------------------------------------------------------------------
-# Target
+# Desktop GUI server (optional) — Dear ImGui (pinned) + SDL2 / SDL_Renderer
+# backends, built as a static lib. Skipped entirely when MULTISHIP_BUILD_GUI=OFF,
+# so headless builds pull in neither ImGui nor a network fetch at configure time.
 # ------------------------------------------------------------------------------
-add_executable(MultiShip
-    src/main.cpp
-    src/Server.cpp
-)
+if(MULTISHIP_BUILD_GUI)
+    include(FetchContent)
+    FetchContent_Declare(
+        imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG v1.91.8
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(imgui)
 
-target_include_directories(MultiShip PRIVATE src)
+    add_library(imgui_sdl2 STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer2.cpp
+    )
+    target_include_directories(imgui_sdl2 PUBLIC
+        ${imgui_SOURCE_DIR}
+        ${imgui_SOURCE_DIR}/backends
+    )
+    target_link_libraries(imgui_sdl2 PUBLIC ${MULTISHIP_SDL2_TARGET})
 
-target_link_libraries(MultiShip PRIVATE
-    ${MULTISHIP_SDL2_TARGET}
-    $<TARGET_NAME_IF_EXISTS:SDL2_net::SDL2_net>
-    $<TARGET_NAME_IF_EXISTS:SDL2_net::SDL2_net-static>
-    nlohmann_json::nlohmann_json
-    spdlog::spdlog
-    imgui_sdl2
-)
+    add_executable(MultiShip
+        src/main.cpp
+        src/Server.cpp
+    )
+    target_include_directories(MultiShip PRIVATE src)
+    target_link_libraries(MultiShip PRIVATE
+        ${MULTISHIP_SDL2_TARGET}
+        $<TARGET_NAME_IF_EXISTS:SDL2_net::SDL2_net>
+        $<TARGET_NAME_IF_EXISTS:SDL2_net::SDL2_net-static>
+        nlohmann_json::nlohmann_json
+        spdlog::spdlog
+        imgui_sdl2
+    )
 
-# We drive SDL_main ourselves (see SDL_MAIN_HANDLED in main.cpp), so a plain
-# console subsystem is fine and keeps stdout logging available.
-set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT MultiShip)
+    # We drive SDL_main ourselves (see SDL_MAIN_HANDLED in main.cpp), so a plain
+    # console subsystem is fine and keeps stdout logging available.
+    set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT MultiShip)
+endif()
 
 # ------------------------------------------------------------------------------
 # Headless CLI variant — same Server, no window. Reads the port from argv and
-# logs to the console. Builds on Windows, Linux and macOS (no ImGui/SDL_Renderer
-# dependency).
+# logs to the console. Builds on Windows, Linux and macOS with no ImGui /
+# SDL_Renderer dependency, so this is the target used for server deployments.
 # ------------------------------------------------------------------------------
 add_executable(MultiShipCLI
     src/main_cli.cpp
@@ -124,3 +139,7 @@ target_link_libraries(MultiShipCLI PRIVATE
     nlohmann_json::nlohmann_json
     spdlog::spdlog
 )
+
+if(NOT MULTISHIP_BUILD_GUI)
+    set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT MultiShipCLI)
+endif()

@@ -1,0 +1,10 @@
+# Keep the build context small and host-specific artifacts out of the image.
+cmake-build-*/
+build/
+out/
+.git/
+.vs/
+vcpkg/
+*.exe
+*.pdb
+*.ilk

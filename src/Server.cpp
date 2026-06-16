@@ -12,8 +12,24 @@ namespace {
 struct ClientConn {
     TCPsocket socket = nullptr;
     std::string buffer;
-    std::string label; // host:port for logging
+    std::string label;    // host:port, used until the player's name is known
+    std::string userName; // name sent by the client in its connection handshake
 };
+
+// Keep player names to a single short, printable line so a client cannot inject
+// newlines or control characters into the server log.
+std::string SanitizeName(const std::string& name) {
+    std::string out;
+    for (char c : name) {
+        if (static_cast<unsigned char>(c) >= 0x20 && c != '\x7f') {
+            out.push_back(c);
+        }
+        if (out.size() >= 32) {
+            break;
+        }
+    }
+    return out;
+}
 } // namespace
 
 Server::~Server() {
@@ -29,12 +45,12 @@ bool Server::Start(uint16_t port) {
     // running flag, so the UI can report failure immediately.
     IPaddress probe;
     if (SDLNet_ResolveHost(&probe, nullptr, port) == -1) {
-        Log(std::string("[Error] SDLNet_ResolveHost: ") + SDLNet_GetError());
+        Log(std::string("[SERVER] Error: SDLNet_ResolveHost: ") + SDLNet_GetError());
         return false;
     }
     TCPsocket test = SDLNet_TCP_Open(&probe);
     if (!test) {
-        Log(std::string("[Error] Could not bind port ") + std::to_string(port) + ": " + SDLNet_GetError());
+        Log(std::string("[SERVER] Error: Could not bind port ") + std::to_string(port) + ": " + SDLNet_GetError());
         return false;
     }
     SDLNet_TCP_Close(test);
@@ -58,14 +74,14 @@ void Server::Run(uint16_t port) {
     IPaddress ip;
     // host == nullptr -> INADDR_ANY: listen on all of the machine's interfaces.
     if (SDLNet_ResolveHost(&ip, nullptr, port) == -1) {
-        Log(std::string("[Error] SDLNet_ResolveHost: ") + SDLNet_GetError());
+        Log(std::string("[SERVER] Error: SDLNet_ResolveHost: ") + SDLNet_GetError());
         mRunning.store(false);
         return;
     }
 
     TCPsocket serverSocket = SDLNet_TCP_Open(&ip);
     if (!serverSocket) {
-        Log(std::string("[Error] SDLNet_TCP_Open: ") + SDLNet_GetError());
+        Log(std::string("[SERVER] Error: SDLNet_TCP_Open: ") + SDLNet_GetError());
         mRunning.store(false);
         return;
     }
@@ -76,7 +92,7 @@ void Server::Run(uint16_t port) {
 
     std::vector<ClientConn> clients;
 
-    Log("[Server] Listening on port " + std::to_string(port) + " (all interfaces)");
+    Log("[SERVER] Listening on port " + std::to_string(port) + " (all interfaces)");
 
     char recvBuf[1024];
     while (mRunning.load()) {
@@ -91,7 +107,7 @@ void Server::Run(uint16_t port) {
             TCPsocket client = SDLNet_TCP_Accept(serverSocket);
             if (client) {
                 if (static_cast<int>(clients.size()) >= MAX_CLIENTS) {
-                    Log("[Server] Connection refused (client limit reached)");
+                    Log("[SERVER] Connection refused (client limit reached)");
                     SDLNet_TCP_Close(client);
                 } else {
                     ClientConn conn;
@@ -112,7 +128,7 @@ void Server::Run(uint16_t port) {
                     SDLNet_TCP_AddSocket(socketSet, client);
                     clients.push_back(std::move(conn));
                     mClientCount.store(static_cast<int>(clients.size()));
-                    Log("[Server] Client connected: " + clients.back().label);
+                    Log("[SERVER] Client connected: " + clients.back().label);
                 }
             }
         }
@@ -127,7 +143,7 @@ void Server::Run(uint16_t port) {
 
             int len = SDLNet_TCP_Recv(conn.socket, recvBuf, sizeof(recvBuf));
             if (len <= 0) {
-                Log("[Server] Client disconnected: " + conn.label);
+                Log("[SERVER] Client disconnected: " + (conn.userName.empty() ? conn.label : conn.userName));
                 SDLNet_TCP_DelSocket(socketSet, conn.socket);
                 SDLNet_TCP_Close(conn.socket);
                 clients.erase(clients.begin() + i);
@@ -146,11 +162,24 @@ void Server::Run(uint16_t port) {
                 std::string summary;
                 try {
                     nlohmann::json json = nlohmann::json::parse(packet);
+                    // The client sends its chosen name in the connection
+                    // handshake; remember it so this client's messages are
+                    // labelled with the player name instead of their address.
+                    if (json.contains("userName") && json["userName"].is_string()) {
+                        std::string name = SanitizeName(json["userName"].get<std::string>());
+                        if (!name.empty() && name != conn.userName) {
+                            conn.userName = name;
+                            Log("[SERVER] " + conn.label + " is now known as " + conn.userName);
+                        }
+                    }
                     summary = json.dump();
                 } catch (const std::exception&) {
                     summary = "(non-JSON) " + packet;
                 }
-                Log("[" + conn.label + "] " + summary);
+                // Messages relayed from a connected player are tagged with their
+                // name (falling back to the address until the name is known).
+                const std::string& who = conn.userName.empty() ? conn.label : conn.userName;
+                Log("[" + who + "] " + summary);
 
                 delim = conn.buffer.find('\0');
             }
@@ -170,7 +199,7 @@ void Server::Run(uint16_t port) {
     SDLNet_TCP_Close(serverSocket);
     SDLNet_FreeSocketSet(socketSet);
 
-    Log("[Server] Stopped");
+    Log("[SERVER] Stopped");
 }
 
 void Server::Log(const std::string& line) {

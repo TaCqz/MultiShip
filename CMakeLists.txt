@@ -6,7 +6,9 @@
 #
 # It speaks the same protocol as the SoH `Network` client: NUL-delimited ('\0') JSON
 # packets over a raw TCP connection, using SDL2_net (same library family as the client).
-cmake_minimum_required(VERSION 3.26.0 FATAL_ERROR)
+# 3.22 is the floor so the project builds with the stock CMake on common LTS
+# distros (e.g. Ubuntu 22.04 ships 3.22.1). Nothing here needs anything newer.
+cmake_minimum_required(VERSION 3.22 FATAL_ERROR)
 
 set(CMAKE_SYSTEM_VERSION 10.0 CACHE STRING "" FORCE)
 set(CMAKE_CXX_STANDARD 20 CACHE STRING "The C++ standard to use")

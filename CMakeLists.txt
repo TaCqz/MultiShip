@@ -104,3 +104,23 @@ target_link_libraries(MultiShip PRIVATE
 # We drive SDL_main ourselves (see SDL_MAIN_HANDLED in main.cpp), so a plain
 # console subsystem is fine and keeps stdout logging available.
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT MultiShip)
+
+# ------------------------------------------------------------------------------
+# Headless CLI variant — same Server, no window. Reads the port from argv and
+# logs to the console. Builds on Windows, Linux and macOS (no ImGui/SDL_Renderer
+# dependency).
+# ------------------------------------------------------------------------------
+add_executable(MultiShipCLI
+    src/main_cli.cpp
+    src/Server.cpp
+)
+
+target_include_directories(MultiShipCLI PRIVATE src)
+
+target_link_libraries(MultiShipCLI PRIVATE
+    ${MULTISHIP_SDL2_TARGET}
+    $<TARGET_NAME_IF_EXISTS:SDL2_net::SDL2_net>
+    $<TARGET_NAME_IF_EXISTS:SDL2_net::SDL2_net-static>
+    nlohmann_json::nlohmann_json
+    spdlog::spdlog
+)

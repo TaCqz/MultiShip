@@ -11,13 +11,28 @@
 
 #include <array>
 #include <list>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
 
 typedef bool (*ConditionFn)();
 
+#define TIME_PASSES true
+#define TIME_DOESNT_PASS false
+
 inline std::string CleanConditionString(const std::string& s) { return s; }
+
+// Spirit Temple shared-age key access data (populated in RegionGraph.cpp).
+struct SpiritLogicData {
+    uint8_t childKeys;
+    uint8_t childRevKeys;
+    uint8_t adultKeys;
+    uint8_t adultRevKeys;
+    ConditionFn childAccess;
+    ConditionFn adultAccess;
+    ConditionFn reverseAccess;
+};
 
 // EVENT_ACCESS(event, condition): rule true -> the LogicVal flag becomes set.
 #define EVENT_ACCESS(event, condition) \
@@ -92,6 +107,11 @@ class Region {
     bool Child() const { return childDay || childNight; }
     bool Adult() const { return adultDay || adultNight; }
     bool HasAccess() const { return Child() || Adult(); }
+    bool BothAgesCheck() const { return Child() && Adult(); }
+    bool AnyAgeTime(ConditionFn condition) const;        // defined in RegionGraph.cpp
+    bool CanPlantBeanCheck(RandomizerGet bean) const;    // defined in RegionGraph.cpp
+
+    static std::map<RandomizerRegion, SpiritLogicData> spiritLogicData;
 };
 
 extern std::array<Region, RR_MAX> areaTable;
@@ -113,6 +133,7 @@ bool SpiritShared(RandomizerRegion region, ConditionFn condition, bool anyAge = 
 
 // --- region table init (each defined in its location_access/*.cpp) ---
 void RegionTable_Init();
+std::shared_ptr<Rando::Logic> NewWorldLogic();  // extra-world logic sharing the Context
 void RegionTable_Init_Root();
 void RegionTable_Init_KokiriForest();
 void RegionTable_Init_LostWoods();

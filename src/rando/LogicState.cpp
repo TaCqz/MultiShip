@@ -299,6 +299,10 @@ void Logic::CollectItem(RandomizerGet rg, bool state) {
     }
 }
 
+void Logic::ClearEvents() {
+    for (bool& f : inLogic) f = false;
+}
+
 void Logic::NewSaveContext() {
     mSaveContext = &mSaveCtxStorage;
     *mSaveContext = SaveContext{};

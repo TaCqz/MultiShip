@@ -153,6 +153,7 @@ class Logic {
     // --- logic flags (events) ---
     bool Get(LogicVal logicVal);
     void Set(LogicVal logicVal, bool value);
+    void ClearEvents();                  // clear all logic flags (keep inventory) for a fresh search
     void Reset(bool resetSaveContext = true);
 
     // --- simulated inventory layer (SaveContext-backed; same accessors as SoH) ---

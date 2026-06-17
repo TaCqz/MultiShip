@@ -50,7 +50,7 @@ class Context {
     OptionValue GetOption(RandomizerSettingKey key) const {
         return OptionValue(options[(size_t)key]);
     }
-    bool GetTrickOption(RandomizerTrick) const { return false; }  // tricks off
+    OptionValue GetTrickOption(RandomizerTrick) const { return OptionValue(0); }  // tricks off
     // Reference seed: Ganon's Castle Boss Key = LACS dungeon rewards.
     uint8_t LACSCondition() const { return RO_LACS_REWARDS; }
     DungeonInfo* GetDungeon(DungeonKey key) { return &dungeons[(size_t)key]; }
@@ -58,8 +58,21 @@ class Context {
 
     void SetOption(RandomizerSettingKey key, uint8_t value) { options[(size_t)key] = value; }
 
-    // Baked to the reference (AP) spoiler == SoH defaults. Defined in Context.cpp.
-    void ApplyDefaultSettings();
+    // Baked to the reference (AP) spoiler == SoH defaults. Options default to 0 (the
+    // "off/closed/vanilla/child" RO_ values); only the ones that differ are set here.
+    void ApplyDefaultSettings() {
+        options[(size_t)RSK_FOREST]              = RO_CLOSED_FOREST_OFF;
+        options[(size_t)RSK_KAK_GATE]            = RO_KAK_GATE_OPEN;
+        options[(size_t)RSK_DOOR_OF_TIME]        = RO_DOOROFTIME_OPEN;   // gates adult access
+        options[(size_t)RSK_ZORAS_FOUNTAIN]      = RO_ZF_CLOSED_CHILD;
+        options[(size_t)RSK_SLEEPING_WATERFALL]  = RO_WATERFALL_CLOSED;
+        options[(size_t)RSK_GERUDO_FORTRESS]     = RO_GF_CARPENTERS_FAST;
+        options[(size_t)RSK_SELECTED_STARTING_AGE] = RO_AGE_CHILD;
+        options[(size_t)RSK_RAINBOW_BRIDGE]      = RO_BRIDGE_GREG;
+        // counts (end-game gates) — see reference spoiler
+        options[(size_t)RSK_LACS_REWARD_COUNT]   = 6;
+        // TODO(parity): remaining count settings + verify every RSK against the spoiler.
+    }
 
   private:
     std::array<uint8_t, RSK_MAX> options{};

@@ -106,6 +106,7 @@ if(MULTISHIP_BUILD_GUI)
     add_executable(MultiShip
         src/main.cpp
         src/Server.cpp
+        src/IceTrap.cpp
     )
     target_include_directories(MultiShip PRIVATE src)
     target_link_libraries(MultiShip PRIVATE
@@ -130,6 +131,7 @@ endif()
 add_executable(MultiShipCLI
     src/main_cli.cpp
     src/Server.cpp
+    src/IceTrap.cpp
 )
 
 target_include_directories(MultiShipCLI PRIVATE src)

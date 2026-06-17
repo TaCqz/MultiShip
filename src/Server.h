@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 // A small TCP server that accepts connections from ShipwreckCombo's MultiShip
@@ -42,6 +43,17 @@ class Server {
     std::vector<std::string> LogSnapshot() const;
     void ClearLog();
 
+    // Queues a packet to be sent to every connected client. Thread-safe: the
+    // payload is actually delivered on the server thread (which owns the
+    // sockets) on its next loop iteration. `payload` is sent as one
+    // NUL-delimited packet, matching the client's wire protocol.
+    void BroadcastToClients(const std::string& payload);
+
+    // Queues a packet for a single client, identified by its player name (or its
+    // host:port label if the name isn't known yet). Same threading/framing as
+    // BroadcastToClients. Currently unwired — no UI triggers it yet.
+    void UnicastToClient(const std::string& clientName, const std::string& payload);
+
   private:
     void Run(uint16_t port);
     void Log(const std::string& line);
@@ -53,6 +65,12 @@ class Server {
     mutable std::mutex mLogMutex;
     std::deque<std::string> mLog;
     static constexpr size_t MAX_LOG_LINES = 500;
+
+    // Packets queued by BroadcastToClients()/UnicastToClient(), drained on the
+    // server thread. mPendingUnicasts holds (clientName, payload) pairs.
+    std::mutex mOutMutex;
+    std::vector<std::string> mPendingBroadcasts;
+    std::vector<std::pair<std::string, std::string>> mPendingUnicasts;
 };
 
 #endif // MULTISHIP_SERVER_H

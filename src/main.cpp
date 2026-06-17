@@ -9,10 +9,12 @@
 #include <imgui_impl_sdlrenderer2.h>
 
 #include <spdlog/spdlog.h>
+#include <nlohmann/json.hpp>
 
 #include <cstdio>
 
 #include "Server.h"
+#include "IceTrap.h"
 
 int main(int, char**) {
     SDL_SetMainReady();
@@ -57,6 +59,10 @@ int main(int, char**) {
     Server server;
     int port = 43384; // default matches the SoH Sail/MultiShip menu default
     bool autoScroll = true;
+    char itemName[64] = "";   // RandomizerGet enum name to give, e.g. RG_KOKIRI_SWORD
+    char playerName[64] = ""; // target player (empty = send to everyone)
+    int iceModelIdx = -1;     // ice-trap-only: IceTrap model preset index, -1 = random
+    int iceTextIdx = -1;      // ice-trap-only: IceTrap text preset index, -1 = random
 
     bool running = true;
     while (running) {
@@ -115,6 +121,74 @@ int main(int, char**) {
         } else {
             ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1.0f), "Stopped");
         }
+
+        // Give an item to a player. Enter the item (a RandomizerGet enum name,
+        // e.g. RG_KOKIRI_SWORD) and the target player's name (leave empty to send
+        // it to everyone). When the item is an ice trap, the model/text fields set
+        // the disguise; leaving one empty lets the client fall back.
+        ImGui::BeginDisabled(!isRunning || server.ClientCount() == 0);
+        ImGui::InputText("Item (RandomizerGet name)", itemName, sizeof(itemName));
+        ImGui::InputText("Player (empty = everyone)", playerName, sizeof(playerName));
+
+        const bool isIceTrap = std::string(itemName) == "RG_ICE_TRAP";
+        if (isIceTrap) {
+            // Pick the disguise model and message from the presets (keys are the
+            // dropdown selections), or "(Random)" to let the server roll one.
+            // Long messages are shortened in the list only.
+            auto shortLabel = [](const char* s) {
+                std::string str = s;
+                return str.size() > 60 ? str.substr(0, 57) + "..." : str;
+            };
+            const char* modelPreview = iceModelIdx < 0 ? "(Random)" : IceTrap::ModelDisplayName(iceModelIdx);
+            if (ImGui::BeginCombo("Ice Trap Model", modelPreview)) {
+                if (ImGui::Selectable("(Random)", iceModelIdx < 0)) {
+                    iceModelIdx = -1;
+                }
+                for (int i = 0; i < IceTrap::ModelCount(); ++i) {
+                    ImGui::PushID(i);
+                    if (ImGui::Selectable(IceTrap::ModelDisplayName(i), iceModelIdx == i)) {
+                        iceModelIdx = i;
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+            std::string textPreview = iceTextIdx < 0 ? std::string("(Random)") : shortLabel(IceTrap::TextLabel(iceTextIdx));
+            if (ImGui::BeginCombo("Ice Trap Text", textPreview.c_str())) {
+                if (ImGui::Selectable("(Random)", iceTextIdx < 0)) {
+                    iceTextIdx = -1;
+                }
+                for (int i = 0; i < IceTrap::TextCount(); ++i) {
+                    ImGui::PushID(i);
+                    if (ImGui::Selectable(shortLabel(IceTrap::TextLabel(i)).c_str(), iceTextIdx == i)) {
+                        iceTextIdx = i;
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+        }
+
+        ImGui::BeginDisabled(itemName[0] == '\0');
+        if (ImGui::Button("Send Item")) {
+            nlohmann::json payload;
+            payload["type"] = "command";
+            payload["command"] = std::string("give_item randomizer ") + itemName;
+            if (isIceTrap) {
+                // -1 means "(Random)" — roll one now (ad-hoc, no seed state).
+                int modelIndex = iceModelIdx < 0 ? IceTrap::RandomModelIndex() : iceModelIdx;
+                int textIndex = iceTextIdx < 0 ? IceTrap::RandomTextIndex() : iceTextIdx;
+                payload["iceTrapModel"] = IceTrap::ModelRgName(modelIndex);
+                payload["iceTrapText"] = IceTrap::ComposeText(modelIndex, textIndex);
+            }
+            if (playerName[0] != '\0') {
+                server.UnicastToClient(playerName, payload.dump());
+            } else {
+                server.BroadcastToClients(payload.dump());
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
 
         ImGui::Separator();
         ImGui::Checkbox("Auto-scroll", &autoScroll);

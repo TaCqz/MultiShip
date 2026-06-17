@@ -98,6 +98,42 @@ void Server::Run(uint16_t port) {
     while (mRunning.load()) {
         // Wait up to 100ms for activity so we can re-check mRunning regularly.
         int ready = SDLNet_CheckSockets(socketSet, 100);
+
+        // Deliver any queued broadcasts (from BroadcastToClients) to all clients.
+        // Done here, on the server thread, so socket I/O stays single-threaded.
+        std::vector<std::string> broadcasts;
+        {
+            std::lock_guard<std::mutex> lock(mOutMutex);
+            broadcasts.swap(mPendingBroadcasts);
+        }
+        for (const std::string& payload : broadcasts) {
+            for (ClientConn& conn : clients) {
+                // +1 sends the trailing '\0' so the packet is NUL-delimited,
+                // matching the client's framing.
+                SDLNet_TCP_Send(conn.socket, payload.c_str(), static_cast<int>(payload.size()) + 1);
+            }
+            Log("[SERVER] Sent request to " + std::to_string(clients.size()) + " client(s)");
+        }
+
+        // Deliver any queued unicasts to their single target client.
+        std::vector<std::pair<std::string, std::string>> unicasts;
+        {
+            std::lock_guard<std::mutex> lock(mOutMutex);
+            unicasts.swap(mPendingUnicasts);
+        }
+        for (const auto& [name, payload] : unicasts) {
+            bool sent = false;
+            for (ClientConn& conn : clients) {
+                if (conn.userName == name || conn.label == name) {
+                    SDLNet_TCP_Send(conn.socket, payload.c_str(), static_cast<int>(payload.size()) + 1);
+                    sent = true;
+                    break; // only the first matching client
+                }
+            }
+            Log(sent ? "[SERVER] Sent request to " + name
+                     : "[SERVER] Unicast target not found: " + name);
+        }
+
         if (ready <= 0) {
             continue;
         }
@@ -219,4 +255,16 @@ std::vector<std::string> Server::LogSnapshot() const {
 void Server::ClearLog() {
     std::lock_guard<std::mutex> lock(mLogMutex);
     mLog.clear();
+}
+
+void Server::BroadcastToClients(const std::string& payload) {
+    // Just queue it; the server thread delivers it on its next loop iteration.
+    std::lock_guard<std::mutex> lock(mOutMutex);
+    mPendingBroadcasts.push_back(payload);
+}
+
+void Server::UnicastToClient(const std::string& clientName, const std::string& payload) {
+    // Just queue it; the server thread delivers it on its next loop iteration.
+    std::lock_guard<std::mutex> lock(mOutMutex);
+    mPendingUnicasts.emplace_back(clientName, payload);
 }

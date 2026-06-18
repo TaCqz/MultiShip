@@ -57,8 +57,15 @@ int VerifyReachable(const std::vector<Placement>& placements, int numWorlds,
 }
 } // namespace
 
-Result Generate(uint64_t seed, int numWorlds) {
+Result Generate(uint64_t seed, int numWorlds, const std::vector<SettingOverride>& settingOverrides,
+                const ProgressFn& progress) {
+    auto report = [&](float f, const char* s) { if (progress) progress(f, s); };
+    report(0.01f, "Building region graph...");
     RegionTable_Init();
+
+    // Apply caller settings on top of the baked defaults (before any logic runs).
+    for (const auto& ov : settingOverrides)
+        if (ov.key < (uint16_t)RSK_MAX) ctx->SetOption((RandomizerSettingKey)ov.key, ov.value);
     std::vector<std::shared_ptr<Rando::Logic>> worlds;
     worlds.push_back(logic);
     for (int w = 1; w < numWorlds; ++w) worlds.push_back(NewWorldLogic());
@@ -77,116 +84,129 @@ Result Generate(uint64_t seed, int numWorlds) {
         else            { nonShuffledLocs.push_back(L.rc); }
     }
 
-    std::mt19937_64 rng(seed);
+    // Assumed fill can occasionally strand progression (assumed-fill candidate search
+    // assumes all unplaced items, so some seeds form placement cycles). Like SoH/AP, we
+    // retry with a salted RNG until beatable. Same input seed => same result (the salt
+    // sequence is deterministic).
+    Result res;
+    res.seed = seed;
+    // Capture the exact settings generation runs under, so the .multiship can ship
+    // them to clients (their world must match these, not their local rando menu).
+    {
+        const auto& opts = ctx->GetAllOptions();
+        res.settings.assign(opts.begin(), opts.end());
+    }
+    constexpr int kMaxAttempts = 40;
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        char stage[96];
+        std::snprintf(stage, sizeof(stage), "Attempt %d - preparing item pool...", attempt + 1);
+        report(0.04f, stage);
+        for (auto& w : worlds) w->Reset();
+        std::mt19937_64 rng(seed + (uint64_t)attempt * 0x9E3779B97F4A7C15ULL);
 
-    // Assumed inventory per world = ALL its non-shuffled vanilla (always obtainable) +
-    // ALL its shuffled progression (removed one at a time as placed).
-    for (int w = 0; w < numWorlds; ++w)
-        for (RandomizerCheck rc : nonShuffledLocs)
-            worlds[w]->CollectItem(vanillaOf[(int)rc], true);
+        std::vector<PoolItemInternal> progression, junk;
+        for (int w = 0; w < numWorlds; ++w)
+            for (RandomizerCheck rc : shuffledLocs) {
+                RandomizerGet it = vanillaOf[(int)rc];
+                (adv.count((int)it) ? progression : junk).push_back({ it, w });
+            }
+        // Assumed inventory per world = ALL its shuffled progression (removed as placed).
+        for (const auto& p : progression) worlds[p.owner]->CollectItem(p.item, true);
 
-    std::vector<PoolItemInternal> progression, junk;
-    for (int w = 0; w < numWorlds; ++w)
-        for (RandomizerCheck rc : shuffledLocs) {
-            RandomizerGet it = vanillaOf[(int)rc];
-            (adv.count((int)it) ? progression : junk).push_back({ it, w });
-        }
-    for (const auto& p : progression) worlds[p.owner]->CollectItem(p.item, true);
+        std::vector<char> empty(numWorlds * RCM, 0);
+        for (int w = 0; w < numWorlds; ++w)
+            for (RandomizerCheck rc : shuffledLocs) empty[Key(w, rc)] = 1;
 
-    std::vector<char> empty(numWorlds * RCM, 0);
-    for (int w = 0; w < numWorlds; ++w)
-        for (RandomizerCheck rc : shuffledLocs) empty[Key(w, rc)] = 1;
+        std::vector<Placement> placements;
+        // Combined forward sweep candidate search: collect already-placed items (cross-
+        // world to owner) + non-shuffled vanilla as locations are reached; snapshot/restore.
+        std::unordered_map<long long, std::pair<RandomizerGet, int>> placedSoFar;
+        std::shuffle(progression.begin(), progression.end(), rng);
+        size_t placedIdx = 0;
+        const size_t progTotal = progression.size();
+        for (const auto& p : progression) {
+            if ((placedIdx & 7) == 0) {
+                std::snprintf(stage, sizeof(stage), "Attempt %d - placing items (%zu/%zu)",
+                              attempt + 1, placedIdx, progTotal);
+                // Placement is the bulk of the work: map it onto [0.05, 0.90].
+                report(progTotal ? 0.05f + 0.85f * ((float)placedIdx / (float)progTotal) : 0.05f, stage);
+            }
+            ++placedIdx;
+            worlds[p.owner]->CollectItem(p.item, false);   // remove from assumed inventory
 
-    std::vector<Placement> placements;
+            std::vector<Rando::SaveContext> snap(numWorlds);
+            for (int w = 0; w < numWorlds; ++w) snap[w] = *worlds[w]->GetSaveContext();
 
-    // --- assumed fill: place each progression item into a reachable empty location ---
-    // Candidate search is a COMBINED forward sweep over all worlds: it collects
-    // already-placed items (cross-world, to their owner) + non-shuffled vanilla as
-    // locations are reached, so cross-world dependency cycles can't form. The assumed
-    // (unplaced) progression stays loaded; we snapshot/restore around each placement.
-    std::unordered_map<long long, std::pair<RandomizerGet, int>> placedSoFar;
-    std::shuffle(progression.begin(), progression.end(), rng);
-    for (const auto& p : progression) {
-        worlds[p.owner]->CollectItem(p.item, false);   // remove from assumed inventory
-
-        std::vector<Rando::SaveContext> snap(numWorlds);
-        for (int w = 0; w < numWorlds; ++w) snap[w] = *worlds[w]->GetSaveContext();
-
-        std::unordered_set<long long> swept;
-        bool prog = true;
-        while (prog) {
-            prog = false;
-            for (int w = 0; w < numWorlds; ++w) {
-                logic = worlds[w];
-                for (RandomizerCheck rc : Search::ReachableLocations()) {
-                    long long k = Key(w, rc);
-                    if (!swept.insert(k).second) continue;
-                    auto it = placedSoFar.find(k);
-                    if (it != placedSoFar.end()) {
-                        worlds[it->second.second]->CollectItem(it->second.first, true); prog = true;
-                    } else if (!shuffledSet.count((int)rc)) {
-                        auto v = vanillaOf.find((int)rc);
-                        if (v != vanillaOf.end()) { worlds[w]->CollectItem(v->second, true); prog = true; }
+            std::unordered_set<long long> swept;
+            bool prog = true;
+            while (prog) {
+                prog = false;
+                for (int w = 0; w < numWorlds; ++w) {
+                    logic = worlds[w];
+                    for (RandomizerCheck rc : Search::ReachableLocations()) {
+                        long long k = Key(w, rc);
+                        if (!swept.insert(k).second) continue;
+                        auto it = placedSoFar.find(k);
+                        if (it != placedSoFar.end()) {
+                            worlds[it->second.second]->CollectItem(it->second.first, true); prog = true;
+                        } else if (!shuffledSet.count((int)rc)) {
+                            auto v = vanillaOf.find((int)rc);
+                            if (v != vanillaOf.end()) { worlds[w]->CollectItem(v->second, true); prog = true; }
+                        }
                     }
                 }
             }
+
+            std::vector<std::pair<int, RandomizerCheck>> cands;
+            for (int w = 0; w < numWorlds; ++w) {
+                logic = worlds[w];
+                for (RandomizerCheck rc : Search::ReachableLocations())
+                    if (empty[Key(w, rc)] && shuffledSet.count((int)rc)) cands.push_back({ w, rc });
+            }
+            for (int w = 0; w < numWorlds; ++w) *worlds[w]->GetSaveContext() = snap[w];  // restore
+
+            if (cands.empty())
+                for (int w = 0; w < numWorlds; ++w)
+                    for (RandomizerCheck rc : shuffledLocs)
+                        if (empty[Key(w, rc)]) cands.push_back({ w, rc });
+            auto pick = cands[rng() % cands.size()];
+            empty[Key(pick.first, pick.second)] = 0;
+            placements.push_back({ pick.second, pick.first, p.item, p.owner });
+            placedSoFar[Key(pick.first, pick.second)] = { p.item, p.owner };
         }
 
-        std::vector<std::pair<int, RandomizerCheck>> cands;
-        for (int w = 0; w < numWorlds; ++w) {
-            logic = worlds[w];
-            for (RandomizerCheck rc : Search::ReachableLocations())
-                if (empty[Key(w, rc)] && shuffledSet.count((int)rc)) cands.push_back({ w, rc });
-        }
-        for (int w = 0; w < numWorlds; ++w) *worlds[w]->GetSaveContext() = snap[w];  // restore
+        // junk fill
+        std::shuffle(junk.begin(), junk.end(), rng);
+        size_t ji = 0;
+        for (int w = 0; w < numWorlds && ji < junk.size(); ++w)
+            for (RandomizerCheck rc : shuffledLocs) {
+                if (!empty[Key(w, rc)]) continue;
+                if (ji >= junk.size()) break;
+                placements.push_back({ rc, w, junk[ji].item, junk[ji].owner });
+                empty[Key(w, rc)] = 0;
+                ++ji;
+            }
 
-        if (cands.empty())
-            for (int w = 0; w < numWorlds; ++w)
-                for (RandomizerCheck rc : shuffledLocs)
-                    if (empty[Key(w, rc)]) cands.push_back({ w, rc });
-        auto pick = cands[rng() % cands.size()];
-        empty[Key(pick.first, pick.second)] = 0;
-        placements.push_back({ pick.second, pick.first, p.item, p.owner });
-        placedSoFar[Key(pick.first, pick.second)] = { p.item, p.owner };
+        // verify: every ADVANCEMENT item reachable? (unreachable junk is harmless)
+        std::snprintf(stage, sizeof(stage), "Attempt %d - verifying reachability...", attempt + 1);
+        report(0.92f, stage);
+        std::unordered_set<long long> reachedKeys;
+        int reached = VerifyReachable(placements, numWorlds, worlds, vanillaOf, shuffledSet, reachedKeys);
+        int stranded = 0;
+        for (const auto& pl : placements)
+            if (adv.count((int)pl.item) && !reachedKeys.count(Key(pl.locWorld, pl.loc))) stranded++;
+
+        if (stranded == 0 || attempt == kMaxAttempts - 1) {
+            res.placements = std::move(placements);
+            res.reached = reached;
+            res.unreachedAdvancement = stranded;
+            res.beatable = (stranded == 0);
+            res.attempts = attempt + 1;
+            for (const auto& pl : res.placements) if (pl.itemWorld != pl.locWorld) res.crossWorld++;
+            break;
+        }
     }
-
-    // --- junk fill ---
-    std::shuffle(junk.begin(), junk.end(), rng);
-    size_t ji = 0;
-    for (int w = 0; w < numWorlds && ji < junk.size(); ++w)
-        for (RandomizerCheck rc : shuffledLocs) {
-            if (!empty[Key(w, rc)]) continue;
-            if (ji >= junk.size()) break;
-            placements.push_back({ rc, w, junk[ji].item, junk[ji].owner });
-            empty[Key(w, rc)] = 0;
-            ++ji;
-        }
-
-    Result res;
-    res.seed = seed;
-    res.placements = std::move(placements);
-    std::unordered_set<long long> reachedKeys;
-    res.reached = VerifyReachable(res.placements, numWorlds, worlds, vanillaOf, shuffledSet, reachedKeys);
-    // The real beatability test: is every ADVANCEMENT item reachable? (Unreachable junk
-    // is harmless.) Progression stranded => not beatable.
-    res.unreachedAdvancement = 0;
-    for (const auto& pl : res.placements)
-        if (adv.count((int)pl.item) && !reachedKeys.count(Key(pl.locWorld, pl.loc)))
-            res.unreachedAdvancement++;
-    res.beatable = (res.unreachedAdvancement == 0);
-    for (const auto& pl : res.placements) if (pl.itemWorld != pl.locWorld) res.crossWorld++;
-
-    if (!res.beatable) {  // diagnostic: name the unreachable PROGRESSION placements
-        std::unordered_map<int, const char*> locName, itemName;
-        for (int i = 0; i < kLocationCount; ++i) locName[(int)kLocations[i].rc] = kLocations[i].name;
-        for (int i = 0; i < kItemCount; ++i) itemName[(int)kItems[i].rg] = kItems[i].name;
-        std::printf("[diag] unreachable PROGRESSION placements:\n");
-        for (const auto& pl : res.placements)
-            if (adv.count((int)pl.item) && !reachedKeys.count(Key(pl.locWorld, pl.loc)))
-                std::printf("   - world%d '%s'  <- %s (owner w%d)\n", pl.locWorld + 1,
-                            locName.count((int)pl.loc) ? locName[(int)pl.loc] : "?",
-                            itemName.count((int)pl.item) ? itemName[(int)pl.item] : "?", pl.itemWorld + 1);
-    }
+    report(0.98f, "Finalizing...");
     return res;
 }
 

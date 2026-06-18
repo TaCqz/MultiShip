@@ -58,6 +58,10 @@ class Context {
 
     void SetOption(RandomizerSettingKey key, uint8_t value) { options[(size_t)key] = value; }
 
+    // The full per-RSK settings vector used for this seed (RSK_MAX entries). Sent to
+    // clients so their world exactly matches the settings generation ran under.
+    const std::array<uint8_t, RSK_MAX>& GetAllOptions() const { return options; }
+
     // Baked to the reference (AP) spoiler == SoH defaults. Options default to 0 (the
     // "off/closed/vanilla/child" RO_ values); only the ones that differ are set here.
     void ApplyDefaultSettings() {

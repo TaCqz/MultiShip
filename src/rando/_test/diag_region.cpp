@@ -58,11 +58,23 @@ int main() {
     // water temple state machine?
     std::printf("== water temple (full inv) ==\n");
     reg(RR_WATER_TEMPLE_ENTRYWAY, "WATER_TEMPLE_ENTRYWAY");
+    reg(RR_WATER_TEMPLE_BOULDERS_SOUTH, "WATER_BOULDERS_SOUTH");
+    reg(RR_WATER_TEMPLE_3_JETS_NO_SWITCH, "WATER_3_JETS_NO_SWITCH");
+    reg(RR_WATER_TEMPLE_CANAL_ALCOVE, "WATER_CANAL_ALCOVE");
+    reg(RR_WATER_TEMPLE_BOULDER_CANAL, "WATER_BOULDER_CANAL");
+    reg(RR_WATER_TEMPLE_BEHIND_CANAL, "WATER_BEHIND_CANAL");
     reg(RR_WATER_TEMPLE_BOSS_KEY_ROOM, "WATER_BOSS_KEY_ROOM");
     reg(RR_WATER_TEMPLE_BOSS_ROOM, "WATER_BOSS_ROOM");
     std::printf("  LOGIC_WATER_HIGH=%s LOW=%s MIDDLE=%s WATER_TEMPLE_CLEAR=%s\n",
                 TF(logic->Get(LOGIC_WATER_HIGH)), TF(logic->Get(LOGIC_WATER_LOW)),
                 TF(logic->Get(LOGIC_WATER_MIDDLE)), TF(logic->Get(LOGIC_WATER_TEMPLE_CLEAR)));
+    std::printf("== ALL Water Temple regions (scene) — reached? ==\n");
+    for (Region& r : areaTable) {
+        if (r.scene != SCENE_WATER_TEMPLE) continue;
+        if (r.regionName.rfind("Water Temple MQ", 0) == 0) continue;   // skip MQ
+        std::printf("  [%s%s%s%s] %s\n", TF(r.childDay), TF(r.childNight),
+                    TF(r.adultDay), TF(r.adultNight), r.regionName.c_str());
+    }
 
     // do some clear-events fire?
     std::printf("== events ==\n");

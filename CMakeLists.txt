@@ -75,6 +75,29 @@ elseif(TARGET SDL2::SDL2)
 endif()
 
 # ------------------------------------------------------------------------------
+# Rando engine — clean-room port of the Ship of Harkinian randomizer logic +
+# multiworld assumed-fill + .multiship/spoiler IO. No SDL/ImGui dependency, so it
+# builds standalone and the headless MultiShipGen CLI links only this.
+# ------------------------------------------------------------------------------
+file(GLOB MULTISHIP_RANDO_SOURCES CONFIGURE_DEPENDS
+    src/rando/Logic.cpp
+    src/rando/LogicState.cpp
+    src/rando/RegionGraph.cpp
+    src/rando/Search.cpp
+    src/rando/Fill.cpp
+    src/rando/SeedFile.cpp
+    src/rando/Session.cpp
+    src/rando/location_access/*.cpp
+    src/rando/location_access/*/*.cpp
+)
+add_library(multiship_rando STATIC ${MULTISHIP_RANDO_SOURCES})
+target_include_directories(multiship_rando PUBLIC src)
+
+# Standalone headless CLI seed generator.
+add_executable(MultiShipGen src/rando/gen_main.cpp)
+target_link_libraries(MultiShipGen PRIVATE multiship_rando)
+
+# ------------------------------------------------------------------------------
 # Desktop GUI server (optional) — Dear ImGui (pinned) + SDL2 / SDL_Renderer
 # backends, built as a static lib. Skipped entirely when MULTISHIP_BUILD_GUI=OFF,
 # so headless builds pull in neither ImGui nor a network fetch at configure time.
@@ -116,6 +139,7 @@ if(MULTISHIP_BUILD_GUI)
         nlohmann_json::nlohmann_json
         spdlog::spdlog
         imgui_sdl2
+        multiship_rando
     )
 
     # We drive SDL_main ourselves (see SDL_MAIN_HANDLED in main.cpp), so a plain
@@ -142,6 +166,7 @@ target_link_libraries(MultiShipCLI PRIVATE
     $<TARGET_NAME_IF_EXISTS:SDL2_net::SDL2_net-static>
     nlohmann_json::nlohmann_json
     spdlog::spdlog
+    multiship_rando
 )
 
 if(NOT MULTISHIP_BUILD_GUI)

@@ -75,10 +75,14 @@ enum : int32_t {
     EVENTCHKINF_USED_FIRE_TEMPLE_BLUE_WARP = 0x14, EVENTCHKINF_USED_WATER_TEMPLE_BLUE_WARP = 0x15,
 };
 
-// gItemSlots: identity (each item is its own inventory slot)
+// gItemSlots: mostly identity, but progressive items that REPLACE one another in a
+// single inventory slot must share that slot (else CheckInventory reads the wrong slot
+// after SetInventory writes the upgraded id) — Hookshot/Longshot and the two Ocarinas.
 inline const std::array<uint32_t, ITEM_SHIM_COUNT> gItemSlots = [] {
     std::array<uint32_t, ITEM_SHIM_COUNT> a{};
     for (uint32_t i = 0; i < ITEM_SHIM_COUNT; ++i) a[i] = i;
+    a[ITEM_LONGSHOT] = ITEM_HOOKSHOT;          // hookshot slot holds NONE/HOOKSHOT/LONGSHOT
+    a[ITEM_OCARINA_TIME] = ITEM_OCARINA_FAIRY; // ocarina slot holds NONE/FAIRY/TIME
     return a;
 }();
 

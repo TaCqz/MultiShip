@@ -26,6 +26,17 @@ int main() {
     Fill::Result r3 = Fill::Generate(99999ULL, 2);
     std::printf("different seed -> different placement: %s\n", !SamePlacements(r, r3) ? "YES" : "no");
 
+    std::printf("=== robustness: 8 seeds ===\n");
+    int beatableCount = 0;
+    for (uint64_t s = 1; s <= 8; ++s) {
+        Fill::Result rr = Fill::Generate(s * 7919ULL + 13ULL, 2);
+        std::printf("  seed %llu: %d/%zu reachable, %d attempt(s) -> %s\n",
+                    (unsigned long long)(s * 7919ULL + 13ULL), rr.reached, rr.placements.size(),
+                    rr.attempts, rr.beatable ? "BEATABLE" : "NOT BEATABLE");
+        if (rr.beatable) beatableCount++;
+    }
+    std::printf("beatable: %d/8\n", beatableCount);
+
     // sample a few cross-world placements
     int shown = 0;
     for (const auto& p : r.placements) {

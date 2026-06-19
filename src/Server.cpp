@@ -208,6 +208,31 @@ void Server::Run(uint16_t port) {
                             Log("[SERVER] " + conn.label + " is now known as " + conn.userName);
                         }
                     }
+
+                    // Multiworld routing: a client reports a collected check, or
+                    // reports its applied-delivery progress on (re)load/connect.
+                    if (mHasSession.load() && json.value("type", "") == "hook" &&
+                        json.contains("hook") && json["hook"].is_object() && !conn.userName.empty()) {
+                        const auto& hook = json["hook"];
+                        const std::string hookType = hook.value("type", "");
+                        if (hookType == "OnCheckCollected" && hook.contains("check") &&
+                            hook["check"].is_number_integer()) {
+                            OnCheckCollected(conn.userName, hook["check"].get<int>());
+                        } else if (hookType == "OnConnected") {
+                            // Push the seed (settings + placements) right away so the
+                            // client can set up the file it's about to create with it.
+                            int world = -1;
+                            {
+                                std::lock_guard<std::mutex> lock(mSessionMutex);
+                                if (mHasSession.load()) world = mSession.WorldOfPlayer(conn.userName);
+                            }
+                            if (world >= 0) SendWorldPlacements(conn.userName, world);
+                        } else if (hookType == "OnLoadGame" &&
+                                   hook.contains("receivedSeq") && hook["receivedSeq"].is_number_unsigned()) {
+                            OnPlayerSync(conn.userName, hook["receivedSeq"].get<uint32_t>());
+                        }
+                    }
+
                     summary = json.dump();
                 } catch (const std::exception&) {
                     summary = "(non-JSON) " + packet;
@@ -267,4 +292,105 @@ void Server::UnicastToClient(const std::string& clientName, const std::string& p
     // Just queue it; the server thread delivers it on its next loop iteration.
     std::lock_guard<std::mutex> lock(mOutMutex);
     mPendingUnicasts.emplace_back(clientName, payload);
+}
+
+void Server::LoadSession(const SeedFile::Loaded& seed, const std::string& sessionPath) {
+    std::lock_guard<std::mutex> lock(mSessionMutex);
+    mSession.LoadSeed(seed);
+    if (!sessionPath.empty()) {
+        std::string err;
+        if (!mSession.AttachSessionFile(sessionPath, err)) {
+            Log("[SERVER] Session file error: " + err + " (continuing in-memory)");
+        }
+    }
+    mHasSession.store(true);
+    std::string who;
+    for (size_t i = 0; i < seed.players.size(); ++i) who += (i ? ", " : "") + seed.players[i];
+    Log("[SERVER] Multiworld routing armed: seed " + std::to_string(seed.seed) + " (" + who + ")");
+}
+
+void Server::DeliverItem(const std::string& player, int itemId, uint32_t seq) {
+    // The client accepts a numeric RandomizerGet id after "give_item randomizer".
+    // `seq` + `multiship` let a Phase-B client persist progress for crash-safety;
+    // a current client simply ignores the extra fields and grants the item.
+    nlohmann::json payload;
+    payload["type"] = "command";
+    payload["command"] = "give_item randomizer " + std::to_string(itemId);
+    payload["seq"] = seq;
+    payload["multiship"] = true;
+    UnicastToClient(player, payload.dump());
+}
+
+void Server::OnCheckCollected(const std::string& userName, int check) {
+    std::vector<Rando::Delivery> deliveries;
+    {
+        std::lock_guard<std::mutex> lock(mSessionMutex);
+        if (!mHasSession.load()) return;
+        int world = mSession.WorldOfPlayer(userName);
+        if (world < 0) {
+            Log("[SERVER] Check from unknown player '" + userName + "' ignored (not in seed)");
+            return;
+        }
+        deliveries = mSession.RecordCheck(world, static_cast<RandomizerCheck>(check));
+    }
+    for (const Rando::Delivery& d : deliveries) {
+        Log("[SERVER] " + userName + " collected check " + std::to_string(check) + " -> item " +
+            std::to_string((int)d.item) + " to " + d.player + " (seq " + std::to_string(d.seq) + ")");
+        DeliverItem(d.player, (int)d.item, d.seq);
+    }
+}
+
+void Server::OnPlayerSync(const std::string& userName, uint32_t receivedSeq) {
+    std::vector<Rando::Delivery> deliveries;
+    int world = -1;
+    {
+        std::lock_guard<std::mutex> lock(mSessionMutex);
+        if (!mHasSession.load()) return;
+        world = mSession.WorldOfPlayer(userName);
+        if (world < 0) return;
+        deliveries = mSession.SyncPlayer(world, receivedSeq);
+    }
+    // Send the world's placements first (so the client's locations show the right
+    // items), then the crash-safe item catch-up.
+    SendWorldPlacements(userName, world);
+    if (!deliveries.empty())
+        Log("[SERVER] Sync " + userName + " from seq " + std::to_string(receivedSeq) + ": re-sending " +
+            std::to_string(deliveries.size()) + " item(s)");
+    for (const Rando::Delivery& d : deliveries)
+        DeliverItem(d.player, (int)d.item, d.seq);
+}
+
+void Server::SendWorldPlacements(const std::string& player, int world) {
+    std::vector<Rando::Session::WorldPlacement> placements;
+    uint64_t seed = 0;
+    std::vector<uint8_t> settings;
+    std::vector<std::string> players;
+    {
+        std::lock_guard<std::mutex> lock(mSessionMutex);
+        if (!mHasSession.load()) return;
+        placements = mSession.WorldPlacements(world);
+        seed = mSession.Seed();
+        settings = mSession.Settings();
+        players = mSession.Players();
+    }
+    if (placements.empty()) return;
+    nlohmann::json payload;
+    payload["type"] = "placements";
+    payload["world"] = world;
+    // The client adopts this as its seed value (the server is the authority).
+    payload["seed"] = static_cast<uint32_t>(seed);
+    // The exact per-RSK settings generation ran under. The client applies these so
+    // its world matches, independent of its local rando menu.
+    payload["settings"] = settings;
+    // Player names so the client can label cross-world sends ("... for <name>").
+    payload["players"] = players;
+    // Each location's item + which world owns it (own-world items the client grants
+    // locally; cross-world ones it shows as "sent" and the server delivers).
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& p : placements)
+        arr.push_back({ { "check", (int)p.loc }, { "item", (int)p.item }, { "owner", p.owner } });
+    payload["placements"] = std::move(arr);
+    UnicastToClient(player, payload.dump());
+    Log("[SERVER] Sent " + std::to_string(placements.size()) + " placements to " + player +
+        " (world " + std::to_string(world) + ")");
 }

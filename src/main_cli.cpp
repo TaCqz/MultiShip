@@ -28,6 +28,7 @@
 #include <thread>
 
 #include "Server.h"
+#include "rando/SeedFile.h"
 
 namespace {
 
@@ -44,11 +45,12 @@ void HandleSignal(int /*sig*/) {
 
 void PrintUsage(const char* exe) {
     std::printf("MultiShip server (headless)\n"
-                "Usage: %s [PORT]\n"
-                "       %s --port <PORT>\n"
-                "       %s -p <PORT>\n"
-                "PORT must be %d-%d (default %d). Press Ctrl+C to stop.\n",
-                exe, exe, exe, kMinPort, kMaxPort, kDefaultPort);
+                "Usage: %s [PORT] [--seed <file.multiship>]\n"
+                "       %s --port <PORT> --seed <file.multiship>\n"
+                "PORT must be %d-%d (default %d).\n"
+                "--seed loads an existing .multiship seed (the placement table the server\n"
+                "       routes items from). Press Ctrl+C to stop.\n",
+                exe, exe, kMinPort, kMaxPort, kDefaultPort);
 }
 
 // Parses a base-10 port from a complete string. Returns false unless the whole
@@ -76,9 +78,11 @@ int main(int argc, char** argv) {
     SDL_SetMainReady();
 
     int port = kDefaultPort;
+    std::string seedPath;
 
     // Read the port from the command line. Supports a bare positional argument
-    // ("MultiShipCLI 43384") as well as "--port N", "--port=N" and "-p N".
+    // ("MultiShipCLI 43384") as well as "--port N", "--port=N" and "-p N", plus
+    // "--seed <path>" to load an existing .multiship seed.
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
 
@@ -89,11 +93,13 @@ int main(int argc, char** argv) {
 
         bool ok = false;
         if (arg == "-p" || arg == "--port") {
-            if (i + 1 < argc) {
-                ok = ParsePort(argv[++i], port);
-            }
+            if (i + 1 < argc) ok = ParsePort(argv[++i], port);
         } else if (arg.rfind("--port=", 0) == 0) {
             ok = ParsePort(arg.substr(std::strlen("--port=")), port);
+        } else if (arg == "--seed" || arg == "--multiship") {
+            if (i + 1 < argc) { seedPath = argv[++i]; ok = true; }
+        } else if (arg.rfind("--seed=", 0) == 0) {
+            seedPath = arg.substr(std::strlen("--seed=")); ok = true;
         } else {
             ok = ParsePort(arg, port);
         }
@@ -103,6 +109,18 @@ int main(int argc, char** argv) {
             PrintUsage(argv[0]);
             return 1;
         }
+    }
+
+    // Load the seed file if given (the server's placement table).
+    SeedFile::Loaded loadedSeed;
+    bool haveSeed = false;
+    if (!seedPath.empty()) {
+        std::string err;
+        if (!SeedFile::ReadMultiship(seedPath, loadedSeed, err)) {
+            std::fprintf(stderr, "Failed to load seed '%s': %s\n", seedPath.c_str(), err.c_str());
+            return 1;
+        }
+        haveSeed = true;
     }
 
     if (port < kMinPort || port > kMaxPort) {
@@ -127,6 +145,23 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, HandleSignal);
 
     spdlog::info("[SERVER] MultiShip CLI running on port {}. Press Ctrl+C to stop.", port);
+    if (haveSeed) {
+        std::string who;
+        for (size_t i = 0; i < loadedSeed.players.size(); ++i)
+            who += (i ? ", " : "") + loadedSeed.players[i];
+        spdlog::info("[SERVER] Loaded seed {} ({} worlds: {}), {} placements.", loadedSeed.seed,
+                     loadedSeed.numWorlds, who, loadedSeed.placements.size());
+        // Arm multiworld routing. The .session (collection history) sits next to the
+        // .multiship so deliveries survive a server restart.
+        std::string sessionPath = seedPath;
+        const std::string ext = ".multiship";
+        if (sessionPath.size() >= ext.size() &&
+            sessionPath.compare(sessionPath.size() - ext.size(), ext.size(), ext) == 0)
+            sessionPath = sessionPath.substr(0, sessionPath.size() - ext.size()) + ".session";
+        else
+            sessionPath += ".session";
+        server.LoadSession(loadedSeed, sessionPath);
+    }
 
     // The server runs on its own thread and logs activity through spdlog (which
     // goes to the console), so we simply idle until interrupted or it stops.

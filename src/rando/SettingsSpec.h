@@ -1,74 +1,92 @@
-// SettingsSpec — the randomizer settings the MultiShip engine actually implements
-// (the ones Context::ApplyDefaultSettings models for logic). Shared by the GUI (to
-// render editable controls) and the generator (defaults must match here). Adding a
-// setting here makes it appear in the Create-seed UI and flow through generation +
-// the .multiship settings block to clients.
+// SettingsSpec — the randomizer settings exposed in the MultiShip Create-seed UI.
+// The full list is AUTO-EXTRACTED from SoH's Settings::CreateOptions() into
+// SettingsSpecData.h (rando-logic/gen_settings.py); this header just adapts it into
+// the SettingSpec shape the GUI/generator use. Defaults mirror SoH's own defaults,
+// which the clean-room engine generates beatable seeds under (verified).
+//
+// NOTE: every setting is exposed + synced to clients + honored at runtime, and the
+// generator honors all LOGIC/world settings. Settings that change the LOCATION POOL
+// (shopsanity, tokensanity, scrubsanity, etc.) are not yet added to the engine's pool
+// — they default off, and enabling them won't create those checks until the engine
+// supports them.
 #pragma once
 #include "randomizerEnums.h"
+#include "rando/SettingsSpecData.h"
+#include <cctype>
 #include <cstdint>
 #include <vector>
 
 namespace Rando {
 
 struct SettingChoice {
-    uint8_t value;       // the RO_* option value
+    uint8_t value;       // the RO_* option value (== index, options are value-ordered)
     const char* label;   // shown in the dropdown
 };
 
 struct SettingSpec {
     RandomizerSettingKey key;
     const char* label;
+    const char* tab;                     // settings menu tab (SoH sidebar)
+    const char* section;                 // section divider header within the column ("" = none)
+    const char* tooltip;                 // hover description (from SoH; "" = none)
+    uint8_t column;                      // column index within the tab
     std::vector<SettingChoice> choices;  // empty => numeric setting (use [numMin, numMax])
     uint8_t defaultValue;
     uint8_t numMin = 0;
     uint8_t numMax = 0;
     bool IsNumeric() const { return choices.empty(); }
+
+    // A plain on/off toggle: exactly two choices labelled "Off" and "On" — rendered
+    // as a checkbox instead of a dropdown.
+    bool IsToggle() const {
+        if (choices.size() != 2) return false;
+        auto eq = [](const char* a, const char* b) {
+            for (; *a && *b; ++a, ++b)
+                if (std::tolower((unsigned char)*a) != std::tolower((unsigned char)*b)) return false;
+            return *a == *b;
+        };
+        const char* a = choices[0].label;
+        const char* b = choices[1].label;
+        return (eq(a, "off") && eq(b, "on")) || (eq(a, "on") && eq(b, "off"));
+    }
+    // The choice value that means "on" (so checkbox state maps to the right RO_ value).
+    uint8_t OnValue() const {
+        for (const auto& c : choices) {
+            const char* s = c.label;
+            if ((std::tolower((unsigned char)s[0]) == 'o') &&
+                (std::tolower((unsigned char)s[1]) == 'n') && s[2] == '\0')
+                return c.value;
+        }
+        return 1;
+    }
 };
 
-// The implemented settings, in display order. Defaults mirror ApplyDefaultSettings.
+// All extracted settings, in SoH's declaration order. Built once from the generated
+// table.
 inline const std::vector<SettingSpec>& MultiShipSettings() {
-    static const std::vector<SettingSpec> specs = {
-        { RSK_FOREST, "Closed Forest",
-          { { RO_CLOSED_FOREST_OFF, "Open" },
-            { RO_CLOSED_FOREST_DEKU_ONLY, "Deku Tree Only" },
-            { RO_CLOSED_FOREST_ON, "Closed" } },
-          RO_CLOSED_FOREST_OFF },
-        { RSK_KAK_GATE, "Kakariko Gate",
-          { { RO_KAK_GATE_OPEN, "Open" }, { RO_KAK_GATE_CLOSED, "Closed" } },
-          RO_KAK_GATE_OPEN },
-        { RSK_DOOR_OF_TIME, "Door of Time",
-          { { RO_DOOROFTIME_OPEN, "Open" },
-            { RO_DOOROFTIME_SONGONLY, "Song Only" },
-            { RO_DOOROFTIME_CLOSED, "Closed" } },
-          RO_DOOROFTIME_OPEN },
-        { RSK_ZORAS_FOUNTAIN, "Zora's Fountain",
-          { { RO_ZF_OPEN, "Open" },
-            { RO_ZF_CLOSED_CHILD, "Closed as Child" },
-            { RO_ZF_CLOSED, "Closed" } },
-          RO_ZF_CLOSED_CHILD },
-        { RSK_SLEEPING_WATERFALL, "Sleeping Waterfall",
-          { { RO_WATERFALL_OPEN, "Open" }, { RO_WATERFALL_CLOSED, "Closed" } },
-          RO_WATERFALL_CLOSED },
-        { RSK_GERUDO_FORTRESS, "Gerudo Fortress Carpenters",
-          { { RO_GF_CARPENTERS_NORMAL, "Normal" },
-            { RO_GF_CARPENTERS_FAST, "Fast" },
-            { RO_GF_CARPENTERS_FREE, "Free" } },
-          RO_GF_CARPENTERS_FAST },
-        { RSK_SELECTED_STARTING_AGE, "Starting Age",
-          { { RO_AGE_CHILD, "Child" }, { RO_AGE_ADULT, "Adult" }, { RO_AGE_RANDOM, "Random" } },
-          RO_AGE_CHILD },
-        { RSK_RAINBOW_BRIDGE, "Rainbow Bridge",
-          { { RO_BRIDGE_VANILLA, "Vanilla" },
-            { RO_BRIDGE_ALWAYS_OPEN, "Always Open" },
-            { RO_BRIDGE_STONES, "Spiritual Stones" },
-            { RO_BRIDGE_MEDALLIONS, "Medallions" },
-            { RO_BRIDGE_DUNGEON_REWARDS, "Dungeon Rewards" },
-            { RO_BRIDGE_DUNGEONS, "Dungeons" },
-            { RO_BRIDGE_TOKENS, "Gold Skulltula Tokens" },
-            { RO_BRIDGE_GREG, "Greg" } },
-          RO_BRIDGE_GREG },
-        { RSK_LACS_REWARD_COUNT, "LACS Reward Count", {}, 6, 0, 9 },
-    };
+    static const std::vector<SettingSpec> specs = [] {
+        std::vector<SettingSpec> v;
+        v.reserve(AllRandoSettings().size());
+        for (const auto& g : AllRandoSettings()) {
+            SettingSpec s;
+            s.key = g.key;
+            s.label = g.label;
+            s.tab = g.tab;
+            s.section = g.section;
+            s.tooltip = g.tooltip;
+            s.column = g.column;
+            s.defaultValue = g.defaultValue;
+            s.numMin = g.numMin;
+            s.numMax = g.numMax;
+            if (!g.numeric) {
+                for (const auto& c : g.choices) {
+                    s.choices.push_back({ c.value, c.label });
+                }
+            }
+            v.push_back(std::move(s));
+        }
+        return v;
+    }();
     return specs;
 }
 

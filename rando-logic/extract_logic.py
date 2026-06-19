@@ -202,25 +202,39 @@ SANITY_TYPES = {
     'STATIC_HINT', 'CHEST_GAME', 'FROG_SONG',
 }
 
+def _location_meta_files():
+    """location_list.cpp (the 741 base checks — their types feed the default pool) FIRST
+    as the authority (it wins on any shared RC, keeping the default pool stable), then the
+    files that register the off-by-default sanity collectibles this engine can pool:
+    cows, fish, freestanding, pots, crates (+ small/NL), beehives. Songs/grass/rocks/etc.
+    are deliberately NOT scanned — songs would collide with gen_metadata's manual SONG
+    append, and the rest have no LC_* category yet (add their file when a feature needs it)."""
+    names = ['location_list.cpp', 'ShuffleCows.cpp', 'fishsanity.cpp',
+             'ShuffleFreestanding.cpp', 'ShufflePots.cpp', 'ShuffleCrates.cpp',
+             'ShuffleBeehives.cpp']
+    return [p for p in (os.path.join(RANDO, n) for n in names) if os.path.exists(p)]
+
 def parse_locations_meta():
-    text = strip_comments(open(os.path.join(RANDO, 'location_list.cpp'),
-                               encoding='utf-8', errors='replace').read())
     meta = {}
-    for m in re.finditer(r'locationTable\[(RC_\w+)\]\s*=\s*Location::(\w+)\s*\(', text):
-        key, factory = m.group(1), m.group(2)
-        open_idx = text.index('(', m.start())
-        end = match_paren(text, open_idx)
-        if end < 0: continue
-        inner = text[open_idx+1:end-1]
-        nm = re.search(r'"([^"]*)"', inner)
-        name = nm.group(1) if nm else key
-        rt = re.search(r'RCTYPE_(\w+)', inner)
-        if rt: rtype = rt.group(1)
-        else: rtype = FACTORY_TYPE.get(factory, factory.upper())
-        vi = re.search(r'\bRG_\w+', inner)
-        vanilla = vi.group(0) if vi else ''
-        meta[key] = {'name': name, 'type': rtype, 'vanilla': vanilla,
-                     'standard': rtype not in SANITY_TYPES}
+    for path in _location_meta_files():
+        text = strip_comments(open(path, encoding='utf-8', errors='replace').read())
+        for m in re.finditer(r'locationTable\[(RC_\w+)\]\s*=\s*Location::(\w+)\s*\(', text):
+            key, factory = m.group(1), m.group(2)
+            if key in meta:
+                continue  # first file (location_list.cpp) wins — keeps the default pool stable
+            open_idx = text.index('(', m.start())
+            end = match_paren(text, open_idx)
+            if end < 0: continue
+            inner = text[open_idx+1:end-1]
+            nm = re.search(r'"([^"]*)"', inner)
+            name = nm.group(1) if nm else key
+            rt = re.search(r'RCTYPE_(\w+)', inner)
+            if rt: rtype = rt.group(1)
+            else: rtype = FACTORY_TYPE.get(factory, factory.upper())
+            vi = re.search(r'\bRG_\w+', inner)
+            vanilla = vi.group(0) if vi else ''
+            meta[key] = {'name': name, 'type': rtype, 'vanilla': vanilla,
+                         'standard': rtype not in SANITY_TYPES}
     return meta
 
 # ---------- resolve helper functions down to item sets ----------

@@ -12,9 +12,12 @@
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cfloat>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <random>
 #include <string>
@@ -114,6 +117,7 @@ int main(int, char**) {
     // initialized to each setting's default.
     std::vector<uint8_t> settingValues;
     for (const auto& spec : Rando::MultiShipSettings()) settingValues.push_back(spec.defaultValue);
+    char settingsFilter[64] = "";  // live search box over the (large) settings list
     std::vector<Fill::SettingOverride> genOverrides;  // captured at Create time for the worker
     std::string createStatus;
     bool seedReady = false;        // a seed has been created or loaded
@@ -249,18 +253,40 @@ int main(int, char**) {
             ImGui::EndDisabled();
             ImGui::Spacing();
 
-            // --- Settings (the implemented ones; both worlds use these) -----------
+            // --- Settings (full set, in tabs like the base randomizer) ------------
             ImGui::SeparatorText("Settings");
-            ImGui::BeginDisabled(busy);
             {
                 const auto& specs = Rando::MultiShipSettings();
-                // Two columns on a wide window, one when narrow — uses the space.
-                const int cols = ImGui::GetContentRegionAvail().x > 560.0f ? 2 : 1;
-                if (ImGui::BeginTable("ms_settings", cols, ImGuiTableFlags_SizingStretchSame)) {
-                    for (size_t i = 0; i < specs.size() && i < settingValues.size(); ++i) {
-                        const Rando::SettingSpec& sp = specs[i];
-                        ImGui::TableNextColumn();
-                        ImGui::PushID((int)i);
+                ImGui::SetNextItemWidth(260.0f);
+                ImGui::InputTextWithHint("##settingsfilter", "Filter settings...", settingsFilter,
+                                         sizeof(settingsFilter));
+                ImGui::SameLine();
+                ImGui::TextDisabled("(%zu settings)", specs.size());
+
+                // Lower-cased filter for a case-insensitive substring match.
+                std::string flt = settingsFilter;
+                for (char& ch : flt) ch = (char)std::tolower((unsigned char)ch);
+
+                auto passesFilter = [&](const Rando::SettingSpec& sp) {
+                    if (flt.empty()) return true;
+                    std::string lbl = sp.label;
+                    for (char& ch : lbl) ch = (char)std::tolower((unsigned char)ch);
+                    return lbl.find(flt) != std::string::npos;
+                };
+
+                // Draw one setting. On/Off toggles render as a single-line checkbox;
+                // everything else as a labelled full-width slider/dropdown. The whole
+                // control is grouped so its SoH description shows as a hover tooltip.
+                auto renderSetting = [&](size_t i) {
+                    const Rando::SettingSpec& sp = specs[i];
+                    ImGui::PushID((int)i);
+                    ImGui::BeginGroup();
+                    if (sp.IsToggle()) {
+                        const uint8_t on = sp.OnValue();
+                        bool checked = (settingValues[i] == on);
+                        if (ImGui::Checkbox(sp.label, &checked))
+                            settingValues[i] = checked ? on : (uint8_t)(on ? 0 : 1);
+                    } else {
                         ImGui::TextUnformatted(sp.label);
                         ImGui::SetNextItemWidth(-FLT_MIN);
                         if (sp.IsNumeric()) {
@@ -280,13 +306,78 @@ int main(int, char**) {
                                 ImGui::EndCombo();
                             }
                         }
-                        ImGui::PopID();
                     }
-                    ImGui::EndTable();
+                    ImGui::EndGroup();
+                    if (sp.tooltip && sp.tooltip[0] && ImGui::IsItemHovered()) {
+                        ImGui::BeginTooltip();
+                        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+                        ImGui::TextUnformatted(sp.tooltip);
+                        ImGui::PopTextWrapPos();
+                        ImGui::EndTooltip();
+                    }
+                    ImGui::PopID();
+                };
+
+                // Reserve space at the bottom for the action bar, so the tabs fill the
+                // rest of the window and the buttons stay anchored at the bottom.
+                float footer = 52.0f;
+                if (busy) footer += 50.0f;
+                if (!createStatus.empty()) footer += 66.0f;
+                float settingsH = ImGui::GetContentRegionAvail().y - footer;
+                if (settingsH < 160.0f) settingsH = 160.0f;
+
+                ImGui::BeginDisabled(busy);
+                ImGui::BeginChild("ms_settings_area", ImVec2(0, settingsH), ImGuiChildFlags_Borders);
+                if (ImGui::BeginTabBar("ms_tabs")) {
+                    for (const char* tab : Rando::SettingTabOrder()) {
+                        if (!ImGui::BeginTabItem(tab)) continue;
+                        ImGui::BeginChild("tabscroll", ImVec2(0, 0));
+
+                        // How many logical columns does this tab use (per the OG menu)?
+                        int numCols = 1;
+                        for (const auto& sp : specs)
+                            if (std::strcmp(sp.tab, tab) == 0 && passesFilter(sp) &&
+                                (int)sp.column + 1 > numCols)
+                                numCols = (int)sp.column + 1;
+
+                        // Responsive: shrink to fit narrow windows (each column wants ~260px).
+                        float avail = ImGui::GetContentRegionAvail().x;
+                        int displayCols = numCols;
+                        while (displayCols > 1 && avail / displayCols < 260.0f) --displayCols;
+
+                        if (ImGui::BeginTable("t", displayCols,
+                                              ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX)) {
+                            ImGui::TableNextRow();
+                            for (int tc = 0; tc < displayCols; ++tc) {
+                                ImGui::TableNextColumn();
+                                // Logical columns assigned to this table cell (round-robin
+                                // when the window is too narrow to show them all side by side).
+                                for (int lc = tc; lc < numCols; lc += displayCols) {
+                                    const char* curSection = nullptr;
+                                    for (size_t i = 0; i < specs.size() && i < settingValues.size(); ++i) {
+                                        const Rando::SettingSpec& sp = specs[i];
+                                        if (std::strcmp(sp.tab, tab) != 0 || (int)sp.column != lc) continue;
+                                        if (!passesFilter(sp)) continue;
+                                        if (sp.section && sp.section[0] &&
+                                            (!curSection || std::strcmp(curSection, sp.section) != 0)) {
+                                            ImGui::SeparatorText(sp.section);
+                                        }
+                                        curSection = sp.section;
+                                        renderSetting(i);
+                                    }
+                                }
+                            }
+                            ImGui::EndTable();
+                        }
+                        ImGui::EndChild();
+                        ImGui::EndTabItem();
+                    }
+                    ImGui::EndTabBar();
                 }
+                ImGui::EndChild();
+                ImGui::EndDisabled();
             }
-            ImGui::EndDisabled();
-            ImGui::Spacing();
+            ImGui::Separator();
 
             ImGui::BeginDisabled(busy);
             if (ImGui::Button("Create Seed", ImVec2(160, 32))) {

@@ -1,5 +1,7 @@
 #include "Server.h"
 
+#include "IceTrap.h"
+
 #include <SDL2/SDL_net.h>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -387,8 +389,23 @@ void Server::SendWorldPlacements(const std::string& player, int world) {
     // Each location's item + which world owns it (own-world items the client grants
     // locally; cross-world ones it shows as "sent" and the server delivers).
     nlohmann::json arr = nlohmann::json::array();
-    for (const auto& p : placements)
-        arr.push_back({ { "check", (int)p.loc }, { "item", (int)p.item }, { "owner", p.owner } });
+    for (const auto& p : placements) {
+        nlohmann::json entry = { { "check", (int)p.loc }, { "item", (int)p.item }, { "owner", p.owner } };
+        // Ice traps wear a disguise: the client renders the slot as a real item
+        // (model + fake name) instead of "Ice Trap". The server is the single source
+        // of truth for that disguise so the shop slot and the eventual get-item
+        // textbox (F-004) always agree. It is derived DETERMINISTICALLY from the seed
+        // and the check id (not baked into the .multiship), so the same slot yields
+        // the same disguise on every reload and for every client viewing it — without
+        // changing the seed-file format.
+        if (p.item == RG_ICE_TRAP) {
+            uint64_t state = seed ^ ((uint64_t)p.loc * 0x9E3779B97F4A7C15ULL + 0x165667B19E3779F9ULL);
+            int modelIdx = IceTrap::RandomModelIndex(&state);
+            entry["iceTrapModel"] = IceTrap::ModelRgName(modelIdx);    // RandomizerGet enum name
+            entry["iceTrapName"] = IceTrap::ModelDisplayName(modelIdx); // fake item name shown in the shop
+        }
+        arr.push_back(std::move(entry));
+    }
     payload["placements"] = std::move(arr);
     UnicastToClient(player, payload.dump());
     Log("[SERVER] Sent " + std::to_string(placements.size()) + " placements to " + player +

@@ -22,6 +22,55 @@ RO_H = os.path.join(SOH, "randomizerEnums", "RandomizerOptions.h")
 OUT = os.path.normpath(os.path.join(HERE, "..", "src", "rando", "SettingsSpecData.h"))
 
 
+# === SINGLE SOURCE OF TRUTH: settings the MultiShip generator actually HONORS =========
+# The Create-seed UI surfaces ONLY the RSK_ keys listed here; everything else is hidden
+# because the clean-room engine either never reads it, normalizes it away, or — for
+# "shuffle a brand-new ability/item into the pool" settings — can't place the item at all
+# (the pool is built purely from the vanilla items of shuffled locations, see Fill.cpp), so
+# enabling them would produce unbeatable seeds. To enable a setting as the engine learns it,
+# add its RSK_ token to this set — that one-line change re-exposes it in the GUI. (Keep this
+# in sync with what Fill.cpp::IsShuffled pools and what the logic in src/rando reads.)
+#
+# Verified against the engine (Fill.cpp + src/rando/**/*.cpp logic references), NOT just the
+# upstream SoH menu — many SoH options are inert in this clean-room port.
+SUPPORTED = {
+    # --- Logic/Access: area access (all gate reachability in location_access/) ---
+    "RSK_FOREST", "RSK_KAK_GATE", "RSK_DOOR_OF_TIME", "RSK_ZORAS_FOUNTAIN",
+    "RSK_SLEEPING_WATERFALL", "RSK_JABU_OPEN", "RSK_LOCK_OVERWORLD_DOORS", "RSK_GERUDO_FORTRESS",
+    # --- Bridge / LACS win conditions + their count sliders (Logic::CanBuild*/CanTriggerLACS) ---
+    "RSK_RAINBOW_BRIDGE", "RSK_BRIDGE_OPTIONS",
+    "RSK_RAINBOW_BRIDGE_STONE_COUNT", "RSK_RAINBOW_BRIDGE_MEDALLION_COUNT",
+    "RSK_RAINBOW_BRIDGE_REWARD_COUNT", "RSK_RAINBOW_BRIDGE_DUNGEON_COUNT",
+    "RSK_RAINBOW_BRIDGE_TOKEN_COUNT",
+    "RSK_GANONS_BOSS_KEY", "RSK_LACS_OPTIONS",
+    "RSK_LACS_MEDALLION_COUNT", "RSK_LACS_STONE_COUNT", "RSK_LACS_DUNGEON_COUNT",
+    "RSK_LACS_REWARD_COUNT", "RSK_LACS_TOKEN_COUNT",
+    "RSK_MEDALLION_LOCKED_TRIALS",
+    # --- Logic/Access: starting age (Fill::Generate resolves Random + forces Door of Time
+    #     open on an adult start; Search::Run seeds the root age from RSK_SELECTED_STARTING_AGE,
+    #     which is the hidden derived value RSK_STARTING_AGE collapses into) ---
+    "RSK_STARTING_AGE",
+    # --- Logic/Access: logic-only QoL gates (referenced in Logic.cpp / location_access) ---
+    "RSK_SKULLS_SUNS_SONG", "RSK_BLUE_FIRE_ARROWS", "RSK_SUNLIGHT_ARROWS",
+    "RSK_SKIP_CHILD_ZELDA", "RSK_MASK_QUEST", "RSK_SKIP_EPONA_RACE",
+    "RSK_SKIP_SCARECROWS_SONG", "RSK_SKIP_PLANTING_BEANS", "RSK_EARLY_GRANNYS_SHOP",
+    "RSK_SLINGBOW_BREAK_BEEHIVES",
+    # --- Dungeon items (FEAT-5 restricted fill in Fill.cpp) ---
+    "RSK_SHUFFLE_MAPANDCOMPASS", "RSK_KEYSANITY", "RSK_BOSS_KEYSANITY",
+    "RSK_SHUFFLE_DUNGEON_REWARDS",
+    # --- Item-pool shuffles whose items already sit at real vanilla locations (Fill::IsShuffled) ---
+    "RSK_SHUFFLE_SONGS", "RSK_SHUFFLE_TOKENS", "RSK_SHUFFLE_KOKIRI_SWORD",
+    "RSK_SHUFFLE_MASTER_SWORD", "RSK_SHUFFLE_OCARINA", "RSK_SHUFFLE_WEIRD_EGG",
+    "RSK_SHUFFLE_ADULT_TRADE",
+    "RSK_FISHSANITY", "RSK_FISHSANITY_AGE_SPLIT",
+    "RSK_SHUFFLE_FREESTANDING", "RSK_SHUFFLE_BEEHIVES", "RSK_SHUFFLE_COWS",
+    "RSK_SHUFFLE_POTS", "RSK_SHUFFLE_CRATES",
+    "RSK_SHOPSANITY", "RSK_SHUFFLE_SCRUBS",
+    # --- Misc: pure gameplay modifier honored by logic + shipped to clients ---
+    "RSK_DAMAGE_MULTIPLIER",
+}
+
+
 def parse_descriptions(path):
     """RSK_NAME -> tooltip text, from mOptionDescriptions[RSK_X] = "..." "...";
 
@@ -319,6 +368,8 @@ def main():
         "    std::vector<GenSettingChoice> choices;",
         "    RandomizerSettingKey visibleWhenKey;     // parent this setting depends on (RSK_NONE = always shown)",
         "    std::vector<uint8_t> visibleWhenValues;  // parent values that reveal it; empty => always shown",
+        "    bool supported;          // the MultiShip generator honors this setting (drives Create-UI exposure)",
+        "    const char* keyName;     // RSK_ enum token as a string (stable key for settings presets)",
         "};",
         "",
         "inline const std::vector<GenSettingData>& AllRandoSettings() {",
@@ -359,17 +410,20 @@ def main():
             tipraw = tipraw.replace(find, repl)
         tip = '"' + tipraw + '"'
         vis = vis_fields(key)
+        # Trailing fields shared by every row: conditional-visibility, then the supported
+        # flag (single source of truth above) and the stable RSK_ key name for presets.
+        tail = f"{vis}, {'true' if key in SUPPORTED else 'false'}, {cstr(key)}"
         if kind == "numeric":
-            lines.append(f"        {head} true, {lo}, {hi}, {default}, {tip}, {{}}, {vis} }},")
+            lines.append(f"        {head} true, {lo}, {hi}, {default}, {tip}, {{}}, {tail} }},")
         elif key in CHOICE_OVERRIDE:
             pairs = CHOICE_OVERRIDE[key]
             ch = ", ".join(f"{{ {val}, {cstr(lbl)} }}" for val, lbl in pairs)
             dflt = default if any(val == default for val, _ in pairs) else pairs[0][0]
-            lines.append(f"        {head} false, 0, 0, {dflt}, {tip}, {{ {ch} }}, {vis} }},")
+            lines.append(f"        {head} false, 0, 0, {dflt}, {tip}, {{ {ch} }}, {tail} }},")
         else:
             ch = ", ".join(f"{{ {i}, {cstr(lbl)} }}" for i, lbl in enumerate(choices))
             dflt = default if default < len(choices) else 0
-            lines.append(f"        {head} false, 0, 0, {dflt}, {tip}, {{ {ch} }}, {vis} }},")
+            lines.append(f"        {head} false, 0, 0, {dflt}, {tip}, {{ {ch} }}, {tail} }},")
     lines += ["    };", "    return data;", "}", ""]
     # Tab display order (SoH sidebar order, then Misc for anything ungrouped).
     used = {r[7] for r in uniq}  # r[7] = tab

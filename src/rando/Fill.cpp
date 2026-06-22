@@ -218,6 +218,31 @@ Result Generate(uint64_t seed, int numWorlds, const std::vector<SettingOverride>
     // Ocarina / adult-trade / weird-egg / kokiri-sword / master-sword are plain on/off
     // toggles now read directly in IsShuffled — the shipped value already matches the
     // pool either way, so they need no normalization (like cows/beehives).
+    //
+    // Starting Age: SoH's user-facing RSK_STARTING_AGE (Child/Adult/Random) is normally
+    // resolved by FinalizeSettings into the concrete RSK_SELECTED_STARTING_AGE that the
+    // world logic + the reachability search (Search::Run) actually read. The clean-room
+    // engine has no FinalizeSettings, so resolve it here: Random picks deterministically
+    // from the seed (independent of the per-attempt fill salt); Child/Adult pass straight
+    // through (RO_AGE_CHILD/ADULT line up with the RSK_SELECTED_STARTING_AGE choice values).
+    // An adult start implies the Door of Time is already open (the Master Sword has been
+    // pulled) — the model needs that so the player can time-travel back to child, so force
+    // it. Collapsing Random + forcing the door keeps the shipped settings truthful (they
+    // describe the world the seed was actually generated for).
+    {
+        uint8_t age = ctx->GetOption(RSK_STARTING_AGE).Get();
+        uint8_t selected;
+        if (age == RO_AGE_ADULT)      selected = RO_AGE_ADULT;
+        else if (age == RO_AGE_CHILD) selected = RO_AGE_CHILD;
+        else {  // RO_AGE_RANDOM (or any out-of-range value) -> deterministic per-seed pick
+            std::mt19937_64 ageRng(seed ^ 0x5DA1A9E3C7B2F00DULL);
+            selected = (ageRng() & 1) ? RO_AGE_ADULT : RO_AGE_CHILD;
+        }
+        ctx->SetOption(RSK_SELECTED_STARTING_AGE, selected);
+        ctx->SetOption(RSK_STARTING_AGE, selected);  // collapse Random so the shipped value is concrete
+        if (selected == RO_AGE_ADULT)
+            ctx->SetOption(RSK_DOOR_OF_TIME, RO_DOOROFTIME_OPEN);
+    }
     std::vector<std::shared_ptr<Rando::Logic>> worlds;
     worlds.push_back(logic);
     for (int w = 1; w < numWorlds; ++w) worlds.push_back(NewWorldLogic());

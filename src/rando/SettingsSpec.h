@@ -25,11 +25,13 @@ struct SettingChoice {
 
 struct SettingSpec {
     RandomizerSettingKey key;
+    const char* keyName;                 // RSK_ enum token as a string (stable preset key)
     const char* label;
     const char* tab;                     // settings menu tab (SoH sidebar)
     const char* section;                 // section divider header within the column ("" = none)
     const char* tooltip;                 // hover description (from SoH; "" = none)
     uint8_t column;                      // column index within the tab
+    bool supported = true;               // the MultiShip generator honors this setting
     std::vector<SettingChoice> choices;  // empty => numeric setting (use [numMin, numMax])
     uint8_t defaultValue;
     uint8_t numMin = 0;
@@ -74,6 +76,8 @@ inline const std::vector<SettingSpec>& MultiShipSettings() {
         for (const auto& g : AllRandoSettings()) {
             SettingSpec s;
             s.key = g.key;
+            s.keyName = g.keyName;
+            s.supported = g.supported;
             s.label = g.label;
             s.tab = g.tab;
             s.section = g.section;

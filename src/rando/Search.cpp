@@ -49,8 +49,16 @@ void Run() {
         r.childDay = r.childNight = r.adultDay = r.adultNight = false;
     }
     logic->ClearEvents();
-    // Default starting age = child; assume time-of-day access (you can wait for day/night).
-    root.childDay = root.childNight = true;
+    // Starting age seeds the root's initial age/time access (you can wait for day/night, so
+    // both times of day are granted). The OTHER age opens once time travel at the Temple of
+    // Time becomes reachable — handled by the bidirectional swap in the fixpoint below. Reads
+    // the live RSK_SELECTED_STARTING_AGE, which Fill::Generate resolves from the user-facing
+    // RSK_STARTING_AGE (and forces the Door of Time open on an adult start so child access can
+    // be reached back through time travel).
+    if (ctx->GetOption(RSK_SELECTED_STARTING_AGE).Is(RO_AGE_ADULT))
+        root.adultDay = root.adultNight = true;
+    else
+        root.childDay = root.childNight = true;
 
     bool changed = true;
     int guard = 0;

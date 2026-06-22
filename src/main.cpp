@@ -55,6 +55,112 @@ static std::string PickMultishipFile() {
     return std::string();
 }
 
+// Native save / open dialogs for a settings-preset JSON. Return "" if cancelled/unsupported.
+static std::string PickSavePresetFile() {
+#ifdef _WIN32
+    char path[MAX_PATH] = "settings.mspreset.json";
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = "MultiShip Settings Preset (*.json)\0*.json\0All Files\0*.*\0";
+    ofn.lpstrDefExt = "json";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = sizeof(path);
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (GetSaveFileNameA(&ofn)) return std::string(path);
+#endif
+    return std::string();
+}
+static std::string PickOpenPresetFile() {
+#ifdef _WIN32
+    char path[MAX_PATH] = "";
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = "MultiShip Settings Preset (*.json)\0*.json\0All Files\0*.*\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = sizeof(path);
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (GetOpenFileNameA(&ofn)) return std::string(path);
+#endif
+    return std::string();
+}
+
+// --- Settings presets ----------------------------------------------------------------
+// A preset is human-readable JSON keyed by the STABLE RSK_ enum NAME (not the spec index
+// or a value order), so it survives spec/enum reordering and additions. Only SUPPORTED
+// settings are written (the generator ignores the rest, so they'd be noise). On load:
+// unknown keys are skipped, and any key the preset omits keeps its current (default)
+// value — making presets forward/backward tolerant across versions. Player names ride
+// along so a preset round-trips the whole Create form.
+static bool SavePreset(const std::string& path, const std::vector<uint8_t>& values,
+                       const char playerNames[2][64], std::string& err) {
+    const auto& specs = Rando::MultiShipSettings();
+    nlohmann::json j;
+    j["multiship_preset_version"] = 1;
+    j["players"] = { std::string(playerNames[0]), std::string(playerNames[1]) };
+    nlohmann::json settings = nlohmann::json::object();
+    for (size_t i = 0; i < specs.size() && i < values.size(); ++i)
+        if (specs[i].supported) settings[specs[i].keyName] = (int)values[i];
+    j["settings"] = std::move(settings);
+
+    const std::string text = j.dump(2);
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) { err = "could not open file for writing"; return false; }
+    size_t n = std::fwrite(text.data(), 1, text.size(), f);
+    std::fclose(f);
+    if (n != text.size()) { err = "short write"; return false; }
+    return true;
+}
+
+// Returns false only on read/parse failure. `appliedOut` reports how many settings were
+// restored (for user feedback). Tolerates a flat {name: value} object as well as the
+// canonical {"settings": {...}} shape.
+static bool LoadPreset(const std::string& path, std::vector<uint8_t>& values,
+                       char playerNames[2][64], int& appliedOut, std::string& err) {
+    appliedOut = 0;
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) { err = "could not open file"; return false; }
+    std::string text;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
+    std::fclose(f);
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(text);
+    } catch (const std::exception& e) {
+        err = std::string("invalid JSON: ") + e.what();
+        return false;
+    }
+
+    // Player names are optional — restore whichever are present.
+    if (j.contains("players") && j["players"].is_array()) {
+        const auto& p = j["players"];
+        for (size_t k = 0; k < 2 && k < p.size(); ++k)
+            if (p[k].is_string())
+                std::snprintf(playerNames[k], 64, "%s", p[k].get<std::string>().c_str());
+    }
+
+    const nlohmann::json& settings =
+        (j.contains("settings") && j["settings"].is_object()) ? j["settings"] : j;
+
+    // Apply by RSK name; a key the preset omits keeps its current value (the spec default),
+    // and a key that maps to no current supported setting is silently skipped.
+    const auto& specs = Rando::MultiShipSettings();
+    for (size_t i = 0; i < specs.size() && i < values.size(); ++i) {
+        if (!specs[i].supported) continue;
+        auto it = settings.find(specs[i].keyName);
+        if (it != settings.end() && it->is_number_integer()) {
+            int v = it->get<int>();
+            if (v >= 0 && v <= 255) {
+                values[i] = (uint8_t)v;
+                ++appliedOut;
+            }
+        }
+    }
+    return true;
+}
+
 // Opens the OS file browser at `path` with that file selected (Windows only).
 static void OpenFileLocation(const std::string& path) {
 #ifdef _WIN32
@@ -75,6 +181,19 @@ static std::string SessionPathFor(const std::string& multishipPath) {
         return multishipPath.substr(0, multishipPath.size() - ext.size()) + ".session";
     }
     return multishipPath + ".session";
+}
+
+// The single entry point into the server for BOTH the Create-finalize step and the
+// menu file picker: read the .multiship back from disk and arm routing with its
+// matching .session file. Reading from disk (instead of reusing an in-memory
+// Fill::Result) guarantees the server state is byte-identical regardless of how we
+// got here — notably the per-RSK settings block, which the old in-memory Create
+// hand-off dropped, producing a broken world on "Continue to server".
+static bool ArmServerFromFile(Server& server, const std::string& multishipPath,
+                              SeedFile::Loaded& out, std::string& err) {
+    if (!SeedFile::ReadMultiship(multishipPath, out, err)) return false;
+    server.LoadSession(out, SessionPathFor(multishipPath));
+    return true;
 }
 
 enum class Screen { Menu, Create, ServerView };
@@ -153,6 +272,7 @@ int main(int, char**) {
     char settingsFilter[64] = "";  // live search box over the (large) settings list
     std::vector<Fill::SettingOverride> genOverrides;  // captured at Create time for the worker
     std::string createStatus;
+    std::string presetStatus;      // feedback for Save/Load Preset (separate from createStatus)
     bool seedReady = false;        // a seed has been created or loaded
     uint64_t activeSeed = 0;
     std::vector<std::string> activePlayers;
@@ -202,23 +322,25 @@ int main(int, char**) {
             genFinished = false;
             genBase = std::to_string(genSeed);
             if (genWriteOk) {
-                createStatus = "Created seed " + genBase +
-                               (genResult.beatable ? "  (beatable)" : "  (NOT beatable!)") +
-                               "  ->  " + genBase + ".multiship  +  _spoiler.txt";
-                seedReady = true;
-                activeSeed = genSeed;
-                activePlayers = genPlayers;
-                activePlacements = (int)genResult.placements.size();
-                activeSource = genBase + ".multiship";
-
-                // Arm multiworld routing for the freshly created seed.
+                // Arm routing by reading the file we just wrote back through the same
+                // path the menu file picker uses, so Create -> Continue produces server
+                // state identical to loading that .multiship by hand. The active* fields
+                // are sourced from what was actually loaded, not the in-memory Result.
+                const std::string mshipPath = genBase + ".multiship";
                 SeedFile::Loaded ld;
-                ld.version = 1;
-                ld.seed = genSeed;
-                ld.numWorlds = (int)genPlayers.size();
-                ld.players = genPlayers;
-                ld.placements = genResult.placements;
-                server.LoadSession(ld, genBase + ".session");
+                std::string loadErr;
+                if (ArmServerFromFile(server, mshipPath, ld, loadErr)) {
+                    createStatus = "Created seed " + genBase +
+                                   (genResult.beatable ? "  (beatable)" : "  (NOT beatable!)") +
+                                   "  ->  " + genBase + ".multiship  +  _spoiler.txt";
+                    seedReady = true;
+                    activeSeed = ld.seed;
+                    activePlayers = ld.players;
+                    activePlacements = (int)ld.placements.size();
+                    activeSource = mshipPath;
+                } else {
+                    createStatus = "Created files but failed to arm server: " + loadErr;
+                }
             } else {
                 createStatus = "Write failed: " + genWriteErr;
             }
@@ -254,13 +376,12 @@ int main(int, char**) {
                 if (!path.empty()) {
                     SeedFile::Loaded ld;
                     std::string err;
-                    if (SeedFile::ReadMultiship(path, ld, err)) {
+                    if (ArmServerFromFile(server, path, ld, err)) {
                         seedReady = true;
                         activeSeed = ld.seed;
                         activePlayers = ld.players;
                         activePlacements = (int)ld.placements.size();
                         activeSource = path;
-                        server.LoadSession(ld, SessionPathFor(path));
                         screen = Screen::ServerView;
                     } else {
                         menuError = "Failed to load: " + err;
@@ -293,11 +414,17 @@ int main(int, char**) {
             ImGui::SeparatorText("Settings");
             {
                 const auto& specs = Rando::MultiShipSettings();
+                // Only settings the generator honors are shown; the rest are hidden because
+                // the engine ignores or normalizes them (toggling them would mislead — see
+                // the SUPPORTED list in rando-logic/gen_settings.py, the single source of
+                // truth). Flip a key there to surface it here.
+                size_t supportedCount = 0;
+                for (const auto& sp : specs) if (sp.supported) ++supportedCount;
                 ImGui::SetNextItemWidth(260.0f);
                 ImGui::InputTextWithHint("##settingsfilter", "Filter settings...", settingsFilter,
                                          sizeof(settingsFilter));
                 ImGui::SameLine();
-                ImGui::TextDisabled("(%zu settings)", specs.size());
+                ImGui::TextDisabled("(%zu generator settings)", supportedCount);
 
                 // Lower-cased filter for a case-insensitive substring match.
                 std::string flt = settingsFilter;
@@ -375,6 +502,7 @@ int main(int, char**) {
                 float footer = 52.0f;
                 if (busy) footer += 50.0f;
                 if (!createStatus.empty()) footer += 66.0f;
+                if (!presetStatus.empty()) footer += 24.0f;
                 float settingsH = ImGui::GetContentRegionAvail().y - footer;
                 if (settingsH < 160.0f) settingsH = 160.0f;
 
@@ -382,14 +510,21 @@ int main(int, char**) {
                 ImGui::BeginChild("ms_settings_area", ImVec2(0, settingsH), ImGuiChildFlags_Borders);
                 if (ImGui::BeginTabBar("ms_tabs")) {
                     for (const char* tab : Rando::SettingTabOrder()) {
+                        // Drop tabs with no honored settings (e.g. all-unsupported tabs like
+                        // Hints/Traps or Starting Items) so empty tabs never appear.
+                        bool tabHasSupported = false;
+                        for (const auto& sp : specs)
+                            if (sp.supported && std::strcmp(sp.tab, tab) == 0) { tabHasSupported = true; break; }
+                        if (!tabHasSupported) continue;
+
                         if (!ImGui::BeginTabItem(tab)) continue;
                         ImGui::BeginChild("tabscroll", ImVec2(0, 0));
 
                         // How many logical columns does this tab use (per the OG menu)?
                         int numCols = 1;
                         for (const auto& sp : specs)
-                            if (std::strcmp(sp.tab, tab) == 0 && passesFilter(sp) && isVisible(sp) &&
-                                (int)sp.column + 1 > numCols)
+                            if (sp.supported && std::strcmp(sp.tab, tab) == 0 && passesFilter(sp) &&
+                                isVisible(sp) && (int)sp.column + 1 > numCols)
                                 numCols = (int)sp.column + 1;
 
                         // Responsive: shrink to fit narrow windows (each column wants ~260px).
@@ -408,6 +543,7 @@ int main(int, char**) {
                                     const char* curSection = nullptr;
                                     for (size_t i = 0; i < specs.size() && i < settingValues.size(); ++i) {
                                         const Rando::SettingSpec& sp = specs[i];
+                                        if (!sp.supported) continue;  // hidden: generator ignores it
                                         if (std::strcmp(sp.tab, tab) != 0 || (int)sp.column != lc) continue;
                                         if (!passesFilter(sp)) continue;
                                         if (!isVisible(sp)) continue;
@@ -488,6 +624,38 @@ int main(int, char**) {
             ImGui::BeginDisabled(busy);
             if (ImGui::Button("Back", ImVec2(80, 32))) screen = Screen::Menu;
             ImGui::EndDisabled();
+
+            // --- Settings presets: save the current form to JSON / load one back ---
+            ImGui::SameLine();
+            ImGui::BeginDisabled(busy);
+            if (ImGui::Button("Save Preset", ImVec2(110, 32))) {
+                std::string path = PickSavePresetFile();
+                if (!path.empty()) {
+                    std::string err;
+                    if (SavePreset(path, settingValues, playerNames, err))
+                        presetStatus = "Saved preset -> " + path;
+                    else
+                        presetStatus = "Save failed: " + err;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Load Preset", ImVec2(110, 32))) {
+                std::string path = PickOpenPresetFile();
+                if (!path.empty()) {
+                    int applied = 0;
+                    std::string err;
+                    if (LoadPreset(path, settingValues, playerNames, applied, err))
+                        presetStatus = "Loaded " + std::to_string(applied) + " setting(s) from " + path;
+                    else
+                        presetStatus = "Load failed: " + err;
+                }
+            }
+            ImGui::EndDisabled();
+
+            if (!presetStatus.empty()) {
+                ImGui::Spacing();
+                ImGui::TextDisabled("%s", presetStatus.c_str());
+            }
 
             // Live progress while the worker runs.
             if (busy) {

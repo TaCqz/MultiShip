@@ -6,6 +6,7 @@
 #include "rando/SettingsSpec.h"
 
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,11 @@ static int gFail = 0;
                               else { std::printf("  ok:   %s\n", msg); } } while (0)
 
 int main() {
+    // The .multiship/.session paths below are relative to "_test/"; create it so the test
+    // is CWD-independent (otherwise the file writes fail silently when run from elsewhere).
+    std::error_code ec;
+    std::filesystem::create_directories("_test", ec);
+
     // 1. Generate a deterministic seed and wrap it as a loaded table.
     Fill::Result r = Fill::Generate(12345, 2);
     std::printf("seed 12345: %zu placements, %d cross-world, beatable=%s\n",

@@ -3,9 +3,15 @@
 #include "rando/Fill.h"
 #include "rando/SeedFile.h"
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 
 int main() {
+    // Output paths are relative to "_test/"; create it so the test is CWD-independent
+    // (running from anywhere just makes a local _test/ — otherwise the writes fail silently).
+    std::error_code ec;
+    std::filesystem::create_directories("_test", ec);
+
     std::vector<std::string> players = { "Mori", "TaCqz" };
     Fill::Result r = Fill::Generate(12345ULL, 2);
     std::printf("generated: %zu placements, beatable=%s, %d attempt(s)\n",

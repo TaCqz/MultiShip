@@ -73,9 +73,21 @@ class Context {
         options[(size_t)RSK_GERUDO_FORTRESS]     = RO_GF_CARPENTERS_FAST;
         options[(size_t)RSK_SELECTED_STARTING_AGE] = RO_AGE_CHILD;
         options[(size_t)RSK_RAINBOW_BRIDGE]      = RO_BRIDGE_GREG;
-        // counts (end-game gates) — see reference spoiler
-        options[(size_t)RSK_LACS_REWARD_COUNT]   = 6;
-        // TODO(parity): remaining count settings + verify every RSK against the spoiler.
+        // Count-based end-game gates (SoH settings.cpp defaults). These keys default to 0
+        // otherwise, which would make any count-based bridge/LACS mode satisfiable from the
+        // start state (0 items >= 0) — a trivially-beatable seed. Logic::CanBuildRainbowBridge
+        // and CanTriggerLACS read these counts, so a non-zero default imposes a real gate.
+        options[(size_t)RSK_RAINBOW_BRIDGE_STONE_COUNT]     = 3;
+        options[(size_t)RSK_RAINBOW_BRIDGE_MEDALLION_COUNT] = 6;
+        options[(size_t)RSK_RAINBOW_BRIDGE_REWARD_COUNT]    = 9;
+        options[(size_t)RSK_RAINBOW_BRIDGE_DUNGEON_COUNT]   = 8;
+        options[(size_t)RSK_RAINBOW_BRIDGE_TOKEN_COUNT]     = 100;
+        options[(size_t)RSK_LACS_STONE_COUNT]              = 3;
+        options[(size_t)RSK_LACS_MEDALLION_COUNT]          = 6;
+        options[(size_t)RSK_LACS_REWARD_COUNT]             = 9;
+        options[(size_t)RSK_LACS_DUNGEON_COUNT]            = 8;
+        options[(size_t)RSK_LACS_TOKEN_COUNT]              = 100;
+        // TODO(parity): verify every remaining RSK against the spoiler.
     }
 
   private:

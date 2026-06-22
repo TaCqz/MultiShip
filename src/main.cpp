@@ -22,6 +22,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "Server.h"
@@ -77,6 +78,38 @@ static std::string SessionPathFor(const std::string& multishipPath) {
 }
 
 enum class Screen { Menu, Create, ServerView };
+
+#ifdef MULTISHIP_DEBUG
+// Debug teleport destinations. Each maps a human label to a SoH entrance index (the
+// argument the client's `entrance <hex>` console command takes). Indices are the primary
+// overworld entrance for each region, from ShipwreckCombo soh/include/tables/entrance_table.h.
+// Age-swapped scenes resolve per the player's current age — e.g. "Castle Grounds" (0x138,
+// SCENE_HYRULE_CASTLE) lands an adult at Outside Ganon's Castle, where the rainbow bridge is.
+struct WarpDest { const char* label; int entrance; };
+static const WarpDest kWarpDests[] = {
+    { "Kokiri Forest",                   0x0EE },
+    { "Lost Woods",                      0x11E },
+    { "Sacred Forest Meadow",            0x0FC },
+    { "Hyrule Field",                    0x0CD },
+    { "Lon Lon Ranch",                   0x157 },
+    { "Market (Castle Town)",            0x0B1 },
+    { "Temple of Time",                  0x053 },
+    { "Castle Grounds / Ganon's Castle", 0x138 },  // adult -> Outside Ganon's Castle (bridge)
+    { "Kakariko Village",                0x0DB },
+    { "Graveyard",                       0x0E4 },
+    { "Death Mountain Trail",            0x13D },
+    { "Death Mountain Crater",           0x147 },
+    { "Goron City",                      0x14D },
+    { "Zora's River",                    0x0EA },
+    { "Zora's Domain",                   0x108 },
+    { "Zora's Fountain",                 0x10E },
+    { "Lake Hylia",                      0x102 },
+    { "Gerudo Valley",                   0x117 },
+    { "Gerudo's Fortress",               0x129 },
+    { "Haunted Wasteland",               0x369 },
+    { "Desert Colossus",                 0x123 },
+};
+#endif
 
 int main(int, char**) {
     SDL_SetMainReady();
@@ -143,10 +176,13 @@ int main(int, char**) {
     // --- server-view state ---
     int port = 43384;
     bool autoScroll = true;
+#ifdef MULTISHIP_DEBUG
     char itemName[64] = "";
     char playerName[64] = "";
     int iceModelIdx = -1;
     int iceTextIdx = -1;
+    int warpDestIdx = 7;  // default to "Castle Grounds / Ganon's Castle" (bridge test)
+#endif
 
     bool running = true;
     while (running) {
@@ -274,6 +310,22 @@ int main(int, char**) {
                     return lbl.find(flt) != std::string::npos;
                 };
 
+                // RSK key -> index, to resolve a setting's conditional-visibility parent.
+                std::unordered_map<int, size_t> idxOfKey;
+                for (size_t i = 0; i < specs.size(); ++i) idxOfKey[(int)specs[i].key] = i;
+
+                // A dependent setting (e.g. Bridge Medallion Count) is only shown while its
+                // parent (Rainbow Bridge) currently holds one of the values that activate it.
+                auto isVisible = [&](const Rando::SettingSpec& sp) {
+                    if (sp.visibleWhenValues.empty()) return true;
+                    auto it = idxOfKey.find((int)sp.visibleWhenKey);
+                    if (it == idxOfKey.end() || it->second >= settingValues.size()) return true;
+                    uint8_t cur = settingValues[it->second];
+                    for (uint8_t v : sp.visibleWhenValues)
+                        if (v == cur) return true;
+                    return false;
+                };
+
                 // Draw one setting. On/Off toggles render as a single-line checkbox;
                 // everything else as a labelled full-width slider/dropdown. The whole
                 // control is grouped so its SoH description shows as a hover tooltip.
@@ -336,7 +388,7 @@ int main(int, char**) {
                         // How many logical columns does this tab use (per the OG menu)?
                         int numCols = 1;
                         for (const auto& sp : specs)
-                            if (std::strcmp(sp.tab, tab) == 0 && passesFilter(sp) &&
+                            if (std::strcmp(sp.tab, tab) == 0 && passesFilter(sp) && isVisible(sp) &&
                                 (int)sp.column + 1 > numCols)
                                 numCols = (int)sp.column + 1;
 
@@ -358,6 +410,7 @@ int main(int, char**) {
                                         const Rando::SettingSpec& sp = specs[i];
                                         if (std::strcmp(sp.tab, tab) != 0 || (int)sp.column != lc) continue;
                                         if (!passesFilter(sp)) continue;
+                                        if (!isVisible(sp)) continue;
                                         if (sp.section && sp.section[0] &&
                                             (!curSection || std::strcmp(curSection, sp.section) != 0)) {
                                             ImGui::SeparatorText(sp.section);
@@ -495,6 +548,9 @@ int main(int, char**) {
                 ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1.0f), "Stopped");
             }
 
+#ifdef MULTISHIP_DEBUG
+            // Debug-only tools (built with -DDEBUG=1): manual give-item, the player target,
+            // and the region teleport. Hidden in normal builds so players can't self-serve.
             // Manual give-item (unchanged from the original tool).
             ImGui::BeginDisabled(!isRunning || server.ClientCount() == 0);
             ImGui::InputText("Item (RandomizerGet name)", itemName, sizeof(itemName));
@@ -542,6 +598,32 @@ int main(int, char**) {
             }
             ImGui::EndDisabled();
             ImGui::EndDisabled();
+
+            // Teleport: warp the targeted player (the "Player" field above; empty = everyone)
+            // to a region. Sends the client's `entrance <hex>` console command. The player must
+            // be in-game (a loaded save) for the warp to take — it no-ops on the title/menu.
+            ImGui::Separator();
+            ImGui::BeginDisabled(!isRunning || server.ClientCount() == 0);
+            ImGui::SetNextItemWidth(260.0f);
+            if (ImGui::BeginCombo("Teleport region", kWarpDests[warpDestIdx].label)) {
+                for (int i = 0; i < (int)(sizeof(kWarpDests) / sizeof(kWarpDests[0])); ++i) {
+                    if (ImGui::Selectable(kWarpDests[i].label, warpDestIdx == i)) warpDestIdx = i;
+                    if (warpDestIdx == i) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Teleport")) {
+                char cmd[32];
+                std::snprintf(cmd, sizeof(cmd), "entrance %X", kWarpDests[warpDestIdx].entrance);
+                nlohmann::json payload;
+                payload["type"] = "command";
+                payload["command"] = cmd;
+                if (playerName[0] != '\0') server.UnicastToClient(playerName, payload.dump());
+                else server.BroadcastToClients(payload.dump());
+            }
+            ImGui::EndDisabled();
+#endif // MULTISHIP_DEBUG
 
             ImGui::Separator();
             ImGui::Checkbox("Auto-scroll", &autoScroll);

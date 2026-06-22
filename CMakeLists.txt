@@ -142,6 +142,13 @@ if(MULTISHIP_BUILD_GUI)
         multiship_rando
     )
 
+    # Debug-only server tools (give-item, player target, region teleport). Enable with
+    # `cmake -DDEBUG=1 ...`; off by default so released builds don't expose them.
+    if(DEBUG)
+        target_compile_definitions(MultiShip PRIVATE MULTISHIP_DEBUG=1)
+        message(STATUS "MultiShip: DEBUG tools enabled (give-item, teleport)")
+    endif()
+
     # We drive SDL_main ourselves (see SDL_MAIN_HANDLED in main.cpp), so a plain
     # console subsystem is fine and keeps stdout logging available.
     set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT MultiShip)

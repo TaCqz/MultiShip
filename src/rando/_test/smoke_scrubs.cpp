@@ -20,14 +20,16 @@ int main() {
         }
     }
 
-    // Unsupported key shuffle: pick Own Dungeon, expect it normalized to Vanilla.
+    // Unsupported key-shuffle sub-mode (Start-With has no start-grant in the clean-room
+    // engine) is folded to Vanilla. (Own/Any/Overworld keysanity are now genuinely
+    // supported via FEAT-5 — see smoke_dungeonitems — so they are NOT folded.)
     {
         std::vector<Fill::SettingOverride> ov = {
-            { (uint16_t)RSK_KEYSANITY, (uint8_t)RO_DUNGEON_ITEM_LOC_OWN_DUNGEON }
+            { (uint16_t)RSK_KEYSANITY, (uint8_t)RO_DUNGEON_ITEM_LOC_STARTWITH }
         };
         Fill::Result r = Fill::Generate(12345, 2, ov);
         bool ok = r.settings[(size_t)RSK_KEYSANITY] == RO_DUNGEON_ITEM_LOC_VANILLA;
-        std::printf("keysanity Own-Dungeon -> synced %u (want Vanilla=%u): %s\n",
+        std::printf("keysanity Start-With -> synced %u (want Vanilla=%u): %s\n",
                     r.settings[(size_t)RSK_KEYSANITY], (unsigned)RO_DUNGEON_ITEM_LOC_VANILLA,
                     ok ? "normalized OK" : "FAIL");
         if (!ok) ++fail;

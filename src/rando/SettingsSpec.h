@@ -34,6 +34,10 @@ struct SettingSpec {
     uint8_t defaultValue;
     uint8_t numMin = 0;
     uint8_t numMax = 0;
+    // Conditional visibility: this setting is only shown while the parent (visibleWhenKey)
+    // holds one of visibleWhenValues. RSK_NONE / empty values => always shown.
+    RandomizerSettingKey visibleWhenKey = RSK_NONE;
+    std::vector<uint8_t> visibleWhenValues;
     bool IsNumeric() const { return choices.empty(); }
 
     // A plain on/off toggle: exactly two choices labelled "Off" and "On" — rendered
@@ -78,6 +82,8 @@ inline const std::vector<SettingSpec>& MultiShipSettings() {
             s.defaultValue = g.defaultValue;
             s.numMin = g.numMin;
             s.numMax = g.numMax;
+            s.visibleWhenKey = g.visibleWhenKey;
+            s.visibleWhenValues = g.visibleWhenValues;
             if (!g.numeric) {
                 for (const auto& c : g.choices) {
                     s.choices.push_back({ c.value, c.label });

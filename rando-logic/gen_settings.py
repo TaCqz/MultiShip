@@ -120,6 +120,20 @@ def main():
 
     rows, skipped = [], []
 
+    # Numeric (NumOpts slider) settings the clean-room engine actually honors and that the
+    # Create-seed UI should expose. The rest of the dynamic-count sliders (Triforce Hunt, MQ
+    # dungeon count, shopsanity counts/prices, key-ring counts, ...) gate pools the engine
+    # canonicalizes at generation time, so exposing them would only mislead — keep skipping
+    # them. The bridge/LACS counts, by contrast, are real end-game gates evaluated by
+    # Logic::CanBuildRainbowBridge / CanTriggerLACS, so they must reach the UI as overrides.
+    NUMERIC_SLIDER_ALLOW = {
+        "RSK_RAINBOW_BRIDGE_STONE_COUNT", "RSK_RAINBOW_BRIDGE_MEDALLION_COUNT",
+        "RSK_RAINBOW_BRIDGE_REWARD_COUNT", "RSK_RAINBOW_BRIDGE_DUNGEON_COUNT",
+        "RSK_RAINBOW_BRIDGE_TOKEN_COUNT",
+        "RSK_LACS_STONE_COUNT", "RSK_LACS_MEDALLION_COUNT", "RSK_LACS_REWARD_COUNT",
+        "RSK_LACS_DUNGEON_COUNT", "RSK_LACS_TOKEN_COUNT",
+    }
+
     def resolve_default(args, kind):
         # The default is the unique RO_* token, else a bare int, else true/false, else 0.
         for a in args:
@@ -137,12 +151,15 @@ def main():
 
     def parse_options(opt_arg):
         opt_arg = opt_arg.strip()
+        # NumOpts(min,max,...) is the slider form; in settings.cpp it's wrapped in braces
+        # ({NumOpts(0, 4)}), so search rather than match-at-start, and check it before the
+        # brace/combo branch (a combo list never contains a NumOpts call).
+        m = re.search(r"NumOpts\(\s*(\d+)\s*,\s*(\d+)", opt_arg)
+        if m:
+            return ("numeric", None, int(m.group(1)), int(m.group(2)))
         if opt_arg.startswith("{"):
             labels = strings_in(opt_arg)
             return ("combo", labels, 0, 0) if labels else (None, None, 0, 0)
-        m = re.match(r"NumOpts\(\s*(\d+)\s*,\s*(\d+)", opt_arg)
-        if m:
-            return ("numeric", None, int(m.group(1)), int(m.group(2)))
         return (None, None, 0, 0)  # variable/precomputed list -> can't extract
 
     for body in balanced_calls(text, "OPT_U8"):
@@ -160,6 +177,9 @@ def main():
         kind, choices, lo, hi = parse_options(args[2])
         if kind is None:
             skipped.append(key + " (dynamic options)")
+            continue
+        if kind == "numeric" and key not in NUMERIC_SLIDER_ALLOW:
+            skipped.append(key + " (numeric slider, not modeled)")
             continue
         default = resolve_default(args[3:], kind)
         rows.append((key, name, kind, choices, lo, hi, default))
@@ -297,28 +317,59 @@ def main():
         "    uint8_t defaultValue;",
         "    const char* tooltip;     // hover description (from SoH option_descriptions.cpp; may be \"\")",
         "    std::vector<GenSettingChoice> choices;",
+        "    RandomizerSettingKey visibleWhenKey;     // parent this setting depends on (RSK_NONE = always shown)",
+        "    std::vector<uint8_t> visibleWhenValues;  // parent values that reveal it; empty => always shown",
         "};",
         "",
         "inline const std::vector<GenSettingData>& AllRandoSettings() {",
         "    static const std::vector<GenSettingData> data = {",
     ]
+    # Conditional visibility, mirroring SoH's OPT_CALLBACK Hide()/Unhide() logic: each
+    # count slider is only shown while its parent setting selects the matching mode (so e.g.
+    # the Bridge Medallion Count is hidden unless Rainbow Bridge == Medallions). The combo
+    # selection value equals the RO_* enum value (choices are emitted in RO-value order), so
+    # the parent values resolve straight through rovals. Add an entry as more dependent
+    # settings get exposed.
+    VISIBLE_WHEN = {
+        "RSK_RAINBOW_BRIDGE_STONE_COUNT":     ("RSK_RAINBOW_BRIDGE", ["RO_BRIDGE_STONES"]),
+        "RSK_RAINBOW_BRIDGE_MEDALLION_COUNT": ("RSK_RAINBOW_BRIDGE", ["RO_BRIDGE_MEDALLIONS"]),
+        "RSK_RAINBOW_BRIDGE_REWARD_COUNT":    ("RSK_RAINBOW_BRIDGE", ["RO_BRIDGE_DUNGEON_REWARDS"]),
+        "RSK_RAINBOW_BRIDGE_DUNGEON_COUNT":   ("RSK_RAINBOW_BRIDGE", ["RO_BRIDGE_DUNGEONS"]),
+        "RSK_RAINBOW_BRIDGE_TOKEN_COUNT":     ("RSK_RAINBOW_BRIDGE", ["RO_BRIDGE_TOKENS"]),
+        "RSK_LACS_STONE_COUNT":     ("RSK_GANONS_BOSS_KEY", ["RO_GANON_BOSS_KEY_LACS_STONES"]),
+        "RSK_LACS_MEDALLION_COUNT": ("RSK_GANONS_BOSS_KEY", ["RO_GANON_BOSS_KEY_LACS_MEDALLIONS"]),
+        "RSK_LACS_REWARD_COUNT":    ("RSK_GANONS_BOSS_KEY", ["RO_GANON_BOSS_KEY_LACS_REWARDS"]),
+        "RSK_LACS_DUNGEON_COUNT":   ("RSK_GANONS_BOSS_KEY", ["RO_GANON_BOSS_KEY_LACS_DUNGEONS"]),
+        "RSK_LACS_TOKEN_COUNT":     ("RSK_GANONS_BOSS_KEY", ["RO_GANON_BOSS_KEY_LACS_TOKENS"]),
+    }
+
+    def vis_fields(key):
+        dep = VISIBLE_WHEN.get(key)
+        if dep:
+            parent, ro_names = dep
+            vals = [rovals[r] for r in ro_names if r in rovals]
+            if vals:
+                return f"{parent}, {{ {', '.join(str(v) for v in vals)} }}"
+        return "RSK_NONE, {}"
+
     for key, name, kind, choices, lo, hi, default, tab, col, sec, _rk in uniq:
         head = f"{{ {key}, {cstr(name)}, {cstr(tab)}, {cstr(sec)}, {col},"
         tipraw = descs.get(key, "")  # inner escapes already preserved
         for find, repl in TOOLTIP_REPLACE.get(key, []):
             tipraw = tipraw.replace(find, repl)
         tip = '"' + tipraw + '"'
+        vis = vis_fields(key)
         if kind == "numeric":
-            lines.append(f"        {head} true, {lo}, {hi}, {default}, {tip}, {{}} }},")
+            lines.append(f"        {head} true, {lo}, {hi}, {default}, {tip}, {{}}, {vis} }},")
         elif key in CHOICE_OVERRIDE:
             pairs = CHOICE_OVERRIDE[key]
             ch = ", ".join(f"{{ {val}, {cstr(lbl)} }}" for val, lbl in pairs)
             dflt = default if any(val == default for val, _ in pairs) else pairs[0][0]
-            lines.append(f"        {head} false, 0, 0, {dflt}, {tip}, {{ {ch} }} }},")
+            lines.append(f"        {head} false, 0, 0, {dflt}, {tip}, {{ {ch} }}, {vis} }},")
         else:
             ch = ", ".join(f"{{ {i}, {cstr(lbl)} }}" for i, lbl in enumerate(choices))
             dflt = default if default < len(choices) else 0
-            lines.append(f"        {head} false, 0, 0, {dflt}, {tip}, {{ {ch} }} }},")
+            lines.append(f"        {head} false, 0, 0, {dflt}, {tip}, {{ {ch} }}, {vis} }},")
     lines += ["    };", "    return data;", "}", ""]
     # Tab display order (SoH sidebar order, then Misc for anything ungrouped).
     used = {r[7] for r in uniq}  # r[7] = tab

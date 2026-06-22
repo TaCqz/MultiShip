@@ -30,11 +30,31 @@ struct ItemRule { ZoneRule zr; uint8_t home; };  // home = the item's own Dungeo
 bool IsShuffled(const LocMeta& L) {
     switch (L.category) {
         case LC_STANDARD:
-        case LC_SONG:
-        case LC_OCARINA:
-        case LC_BOSS_HEART:
-        case LC_ADULT_TRADE:
+            // Three otherwise-standard locations are gated by item-specific toggles. With
+            // the toggle off the vanilla item stays put (location not pooled); with it on
+            // the location joins the pool like any other standard check. The vacated item
+            // is collected in-world during verify, so an Off seed stays beatable.
+            if (L.vanilla == RG_KOKIRI_SWORD) return ctx->GetOption(RSK_SHUFFLE_KOKIRI_SWORD).Get() != 0;
+            if (L.vanilla == RG_MASTER_SWORD) return ctx->GetOption(RSK_SHUFFLE_MASTER_SWORD).Get() != 0;
+            if (L.vanilla == RG_WEIRD_EGG)    return ctx->GetOption(RSK_SHUFFLE_WEIRD_EGG).Get() != 0;
             return true;
+        case LC_BOSS_HEART:
+            // Boss-heart containers (and the Lens-of-Truth / Ice-Arrows checks grouped
+            // here) have no toggle in the menu — always pooled, like LC_STANDARD.
+            return true;
+        case LC_SONG:
+            // Songs have Song-Locations / Dungeon-Rewards restricted-placement modes the
+            // clean-room fill can't model; it does a full (Anywhere) shuffle for any
+            // non-off mode (Generate normalizes the shipped value to Anywhere). Off keeps
+            // each song on its vanilla teaching location.
+            return ctx->GetOption(RSK_SHUFFLE_SONGS).Get() != RO_SONG_SHUFFLE_OFF;
+        case LC_OCARINA:
+            // On/off toggle: pools both ocarina locations (Saria's gift + Ocarina of Time).
+            return ctx->GetOption(RSK_SHUFFLE_OCARINA).Get() != 0;
+        case LC_ADULT_TRADE:
+            // On/off toggle: pools the adult-trade-quest checks. Off leaves the vanilla
+            // trade sequence in place (the Claim Check is a normal LC_STANDARD check).
+            return ctx->GetOption(RSK_SHUFFLE_ADULT_TRADE).Get() != 0;
         case LC_SKULL_TOKEN: {
             uint8_t mode = ctx->GetOption(RSK_SHUFFLE_TOKENS).Get();
             if (mode == RO_TOKENSANITY_ALL) return true;
@@ -189,6 +209,15 @@ Result Generate(uint64_t seed, int numWorlds, const std::vector<SettingOverride>
     if (ctx->GetOption(RSK_SHUFFLE_FREESTANDING).Get() != RO_SHUFFLE_FREESTANDING_OFF)
         ctx->SetOption(RSK_SHUFFLE_FREESTANDING, RO_SHUFFLE_FREESTANDING_ALL);
     // Cowsanity + beehives are plain toggles — no sub-mode to normalize.
+    // Songs: the engine does a full (Anywhere) shuffle and can't restrict placement to
+    // song-teaching locations or dungeon rewards. Canonicalize any non-off mode to
+    // Anywhere so the shipped setting describes the pool the client receives (Off keeps
+    // songs vanilla and is already faithful).
+    if (ctx->GetOption(RSK_SHUFFLE_SONGS).Get() != RO_SONG_SHUFFLE_OFF)
+        ctx->SetOption(RSK_SHUFFLE_SONGS, RO_SONG_SHUFFLE_ANYWHERE);
+    // Ocarina / adult-trade / weird-egg / kokiri-sword / master-sword are plain on/off
+    // toggles now read directly in IsShuffled — the shipped value already matches the
+    // pool either way, so they need no normalization (like cows/beehives).
     std::vector<std::shared_ptr<Rando::Logic>> worlds;
     worlds.push_back(logic);
     for (int w = 1; w < numWorlds; ++w) worlds.push_back(NewWorldLogic());

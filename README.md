@@ -57,7 +57,7 @@ Tracked across the whole project (MultiShip + ShipwreckCombo). Checked items are
 items get checked off here as they land. Each entry shows its id, type
 (`feat`/`fix`/`opt`) and the repo(s) it touches.
 
-**5 shipped · 21 open**
+**11 shipped · 9 open · 5 parked**
 
 ### Multiworld item presentation
 - [x] **F-001** Shopsanity item labels show owning player — _feat, ShipwreckCombo_
@@ -67,37 +67,37 @@ items get checked off here as they land. Each entry shows its id, type
 
 ### Client runtime & item delivery
 - [x] **F-023** Area-access settings (forest/gate/door of time/fountain/etc.) don't take effect in-game — _fix, ShipwreckCombo_  _(needs F-005)_
-- [ ] **F-025** "Continue to Server" after creating a seed loads a broken seed — _fix, MultiShip_
-- [ ] **F-027** Item lost if another arrives during the get-item (over-head) animation — _fix, ShipwreckCombo_
+- [x] **F-025** "Continue to Server" after creating a seed loads a broken seed — _fix, MultiShip_
+- [x] **F-027** Item lost if another arrives during the get-item (over-head) animation — _fix, ShipwreckCombo_
 
 ### Generator correctness
-- [ ] **F-009** Honor or normalize Songs / Ocarina / Adult-Trade / Egg / Sword shuffles — _fix, MultiShip_
-- [ ] **F-010** Wire bridge/LACS count requirements + sane defaults (count modes trivially beatable) — _fix, MultiShip_
+- [x] **F-009** Honor or normalize Songs / Ocarina / Adult-Trade / Egg / Sword shuffles — _fix, MultiShip_
+- [x] **F-010** Wire bridge/LACS count requirements + sane defaults (count modes trivially beatable) — _fix, MultiShip_
 - [ ] **F-006** Fix 2 logic-fidelity locations in the clean-room engine — _fix, MultiShip_
 - [ ] **F-013** Implement 'All Locations Reachable' verification mode — _feat, MultiShip_
 
 ### Generator features (settings not yet honored)
 - [ ] **F-011** Add Context::FinalizeSettings + apply starting inventory/songs/equipment to logic — _feat, MultiShip_
-- [ ] **F-012** Resolve RSK_STARTING_AGE (Child/Adult/Random) into RSK_SELECTED_STARTING_AGE — _fix, MultiShip_  _(needs F-011)_
+- [x] **F-012** Resolve RSK_STARTING_AGE (Child/Adult/Random) into RSK_SELECTED_STARTING_AGE — _fix, MultiShip_  _(needs F-011)_
 - [ ] **F-014** Item pool quantity (Plentiful/Balanced/Scarce/Minimal) + pool edits — _feat, MultiShip_
-- [ ] **F-015** Additional sanities: grass/signs/fairies/merchants/etc. — _feat, MultiShip_
 - [ ] **F-016** Key rings (RSK_KEYRINGS + per-dungeon) — _feat, MultiShip_
 - [ ] **F-017** Triforce Hunt + Ganon's Trials + LACS sub-modes — _feat, MultiShip_  _(needs F-011)_
-- [ ] **F-018** Master Quest dungeon support — _feat, MultiShip_  _(needs F-011)_
-- [ ] **F-019** Entrance randomizer — _feat, MultiShip_
 - [ ] **F-020** Logic rules: No-Logic mode + trick/glitch logic options — _feat, MultiShip_
 - [ ] **F-024** Honor shopsanity item-count (currently forced to all 8 per shop) — _feat, MultiShip_
 
 ### UI / tooling / QoL
-- [ ] **F-026** Settings presets (save/load JSON) + gate UI to supported settings — _feat, MultiShip_
+- [x] **F-026** Settings presets (save/load JSON) + gate UI to supported settings — _feat, MultiShip_
 - [ ] **F-022** QoL: generation-time settings-coverage guard + smoke tests for the gaps — _opt, MultiShip_
-- [ ] **F-028** Remove entrance-randomizer settings from the UI (no effect yet) — _fix, MultiShip_
 
-### Parked (low priority / contingency)
+### Parked (deprioritized — not being worked now)
 - [ ] **F-007** Own-dungeon keysanity retry reduction (CONTINGENCY) — _fix, MultiShip_
 - [ ] **F-008** Restore niche dungeon-item sub-modes to full fidelity (LOW PRIORITY) — _feat, MultiShip_
+- [ ] **F-015** Additional sanities: grass/signs/fairies/merchants/etc. — _feat, MultiShip_
+- [ ] **F-018** Master Quest dungeon support — _feat, MultiShip_
+- [ ] **F-019** Entrance randomizer — _feat, MultiShip_
 
 ### Dropped / merged
 - ~~**F-005** Guard MultiShip file creation until server seed is cached~~ — CANCELLED — tried and reverted
 - ~~**F-021** QoL: only expose settings the generator actually honors~~ — MERGED into F-026 (settings presets + gate-UI-to-supported are the same Create-screen work)
+- ~~**F-028** Remove entrance-randomizer settings from the UI (no effect yet)~~ — CANCELLED — subsumed by F-026 Part B, which gates the UI to generator-honored settings and already hides the entrance-randomizer family
 <!-- BACKLOG:END -->

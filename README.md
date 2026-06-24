@@ -57,7 +57,7 @@ Tracked across the whole project (MultiShip + ShipwreckCombo). Checked items are
 items get checked off here as they land. Each entry shows its id, type
 (`feat`/`fix`/`opt`) and the repo(s) it touches.
 
-**11 shipped · 9 open · 5 parked**
+**11 shipped · 9 open · 1 in progress · 5 parked**
 
 ### Multiworld item presentation
 - [x] **F-001** Shopsanity item labels show owning player — _feat, ShipwreckCombo_
@@ -66,6 +66,7 @@ items get checked off here as they land. Each entry shows its id, type
 - [x] **F-004** Ice-trap name consistency between shop and collection textbox — _feat, ShipwreckCombo_  _(needs F-002)_
 
 ### Client runtime & item delivery
+- [ ] **F-029** URGENT: creation-time settings (starting age/items/mask quest) don't apply to a fresh MultiShip save — _fix, ShipwreckCombo_
 - [x] **F-023** Area-access settings (forest/gate/door of time/fountain/etc.) don't take effect in-game — _fix, ShipwreckCombo_  _(needs F-005)_
 - [x] **F-025** "Continue to Server" after creating a seed loads a broken seed — _fix, MultiShip_
 - [x] **F-027** Item lost if another arrives during the get-item (over-head) animation — _fix, ShipwreckCombo_

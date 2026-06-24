@@ -151,16 +151,6 @@ int main(int argc, char** argv) {
             who += (i ? ", " : "") + loadedSeed.players[i];
         spdlog::info("[SERVER] Loaded seed {} ({} worlds: {}), {} placements.", loadedSeed.seed,
                      loadedSeed.numWorlds, who, loadedSeed.placements.size());
-        // Arm multiworld routing. The .session (collection history) sits next to the
-        // .multiship so deliveries survive a server restart.
-        std::string sessionPath = seedPath;
-        const std::string ext = ".multiship";
-        if (sessionPath.size() >= ext.size() &&
-            sessionPath.compare(sessionPath.size() - ext.size(), ext.size(), ext) == 0)
-            sessionPath = sessionPath.substr(0, sessionPath.size() - ext.size()) + ".session";
-        else
-            sessionPath += ".session";
-        server.LoadSession(loadedSeed, sessionPath);
     }
 
     // The server runs on its own thread and logs activity through spdlog (which

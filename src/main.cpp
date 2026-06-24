@@ -1,6 +1,11 @@
-// MultiShip server — ImGui front-end. First choose to CREATE a new multiworld seed
+// MultiShip server — ImGui front-end. First choose to CREATE a new (empty) seed
 // or START the server with an existing .multiship seed, then run the server that the
 // ShipwreckCombo MultiShip module connects to.
+//
+// Reset baseline: the randomization engine is gone. "Create a new seed" writes an
+// empty .multiship (header + seed + player names, zero placements/settings); the
+// Create screen offers only player names + presets. The server is a relay; under
+// MULTISHIP_DEBUG it also exposes a manual give-item picker and a region teleport.
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_net.h>
@@ -13,23 +18,16 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
-#include <atomic>
-#include <cctype>
-#include <cfloat>
 #include <cstdio>
 #include <cstring>
-#include <mutex>
+#include <filesystem>
 #include <random>
 #include <string>
-#include <thread>
-#include <unordered_map>
 #include <vector>
 
 #include "Server.h"
-#include "IceTrap.h"
-#include "rando/Fill.h"
 #include "rando/SeedFile.h"
-#include "rando/SettingsSpec.h"
+#include "rando/ItemNames.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -38,6 +36,9 @@
 #pragma comment(lib, "comdlg32.lib")   // GetOpenFileNameA
 #pragma comment(lib, "shell32.lib")    // ShellExecuteA
 #endif
+
+// The folder scanned for preset templates (and the default place new presets land).
+static const char* kPresetDir = "presets";
 
 // Native open-file dialog for a .multiship seed. Returns "" if cancelled/unsupported.
 // (Win32 GetOpenFileName — dependency-free; swap for tinyfiledialogs for cross-platform.)
@@ -58,10 +59,10 @@ static std::string PickMultishipFile() {
 // Native save / open dialogs for a settings-preset JSON. Return "" if cancelled/unsupported.
 static std::string PickSavePresetFile() {
 #ifdef _WIN32
-    char path[MAX_PATH] = "settings.mspreset.json";
+    char path[MAX_PATH] = "preset.mspreset.json";
     OPENFILENAMEA ofn{};
     ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter = "MultiShip Settings Preset (*.json)\0*.json\0All Files\0*.*\0";
+    ofn.lpstrFilter = "MultiShip Preset (*.mspreset.json)\0*.mspreset.json\0All Files\0*.*\0";
     ofn.lpstrDefExt = "json";
     ofn.lpstrFile = path;
     ofn.nMaxFile = sizeof(path);
@@ -75,7 +76,7 @@ static std::string PickOpenPresetFile() {
     char path[MAX_PATH] = "";
     OPENFILENAMEA ofn{};
     ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter = "MultiShip Settings Preset (*.json)\0*.json\0All Files\0*.*\0";
+    ofn.lpstrFilter = "MultiShip Preset (*.mspreset.json)\0*.mspreset.json\0All Files\0*.*\0";
     ofn.lpstrFile = path;
     ofn.nMaxFile = sizeof(path);
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
@@ -85,22 +86,15 @@ static std::string PickOpenPresetFile() {
 }
 
 // --- Settings presets ----------------------------------------------------------------
-// A preset is human-readable JSON keyed by the STABLE RSK_ enum NAME (not the spec index
-// or a value order), so it survives spec/enum reordering and additions. Only SUPPORTED
-// settings are written (the generator ignores the rest, so they'd be noise). On load:
-// unknown keys are skipped, and any key the preset omits keeps its current (default)
-// value — making presets forward/backward tolerant across versions. Player names ride
-// along so a preset round-trips the whole Create form.
-static bool SavePreset(const std::string& path, const std::vector<uint8_t>& values,
-                       const char playerNames[2][64], std::string& err) {
-    const auto& specs = Rando::MultiShipSettings();
+// With the randomizer settings gone, a preset effectively round-trips the player
+// names. The JSON shape/plumbing is kept (version + players + an empty settings
+// object, keyed by RSK enum name when settings return), so existing tooling and a
+// future settings block stay compatible.
+static bool SavePreset(const std::string& path, const char playerNames[2][64], std::string& err) {
     nlohmann::json j;
     j["multiship_preset_version"] = 1;
     j["players"] = { std::string(playerNames[0]), std::string(playerNames[1]) };
-    nlohmann::json settings = nlohmann::json::object();
-    for (size_t i = 0; i < specs.size() && i < values.size(); ++i)
-        if (specs[i].supported) settings[specs[i].keyName] = (int)values[i];
-    j["settings"] = std::move(settings);
+    j["settings"] = nlohmann::json::object();  // none in the reset baseline
 
     const std::string text = j.dump(2);
     FILE* f = std::fopen(path.c_str(), "wb");
@@ -111,12 +105,9 @@ static bool SavePreset(const std::string& path, const std::vector<uint8_t>& valu
     return true;
 }
 
-// Returns false only on read/parse failure. `appliedOut` reports how many settings were
-// restored (for user feedback). Tolerates a flat {name: value} object as well as the
-// canonical {"settings": {...}} shape.
-static bool LoadPreset(const std::string& path, std::vector<uint8_t>& values,
-                       char playerNames[2][64], int& appliedOut, std::string& err) {
-    appliedOut = 0;
+// Restores whichever player names the preset carries. Returns false only on
+// read/parse failure (a preset with no "players" array is still a success).
+static bool LoadPreset(const std::string& path, char playerNames[2][64], std::string& err) {
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) { err = "could not open file"; return false; }
     std::string text;
@@ -133,32 +124,31 @@ static bool LoadPreset(const std::string& path, std::vector<uint8_t>& values,
         return false;
     }
 
-    // Player names are optional — restore whichever are present.
     if (j.contains("players") && j["players"].is_array()) {
         const auto& p = j["players"];
         for (size_t k = 0; k < 2 && k < p.size(); ++k)
             if (p[k].is_string())
                 std::snprintf(playerNames[k], 64, "%s", p[k].get<std::string>().c_str());
     }
-
-    const nlohmann::json& settings =
-        (j.contains("settings") && j["settings"].is_object()) ? j["settings"] : j;
-
-    // Apply by RSK name; a key the preset omits keeps its current value (the spec default),
-    // and a key that maps to no current supported setting is silently skipped.
-    const auto& specs = Rando::MultiShipSettings();
-    for (size_t i = 0; i < specs.size() && i < values.size(); ++i) {
-        if (!specs[i].supported) continue;
-        auto it = settings.find(specs[i].keyName);
-        if (it != settings.end() && it->is_number_integer()) {
-            int v = it->get<int>();
-            if (v >= 0 && v <= 255) {
-                values[i] = (uint8_t)v;
-                ++appliedOut;
-            }
-        }
-    }
     return true;
+}
+
+// Lists *.mspreset.json files in the preset folder (full paths), for the template
+// dropdown. Missing folder -> empty list (not an error).
+static std::vector<std::string> ScanPresetTemplates() {
+    std::vector<std::string> out;
+    std::error_code ec;
+    if (!std::filesystem::is_directory(kPresetDir, ec)) return out;
+    for (const auto& entry : std::filesystem::directory_iterator(kPresetDir, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file()) continue;
+        const std::string name = entry.path().filename().string();
+        if (name.size() >= 14 &&
+            name.compare(name.size() - 14, 14, ".mspreset.json") == 0)
+            out.push_back(entry.path().string());
+    }
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 // Opens the OS file browser at `path` with that file selected (Windows only).
@@ -170,30 +160,6 @@ static void OpenFileLocation(const std::string& path) {
         ShellExecuteA(nullptr, "open", "explorer.exe", arg.c_str(), nullptr, SW_SHOWNORMAL);
     }
 #endif
-}
-
-// The .session file (server's collection history) sits next to the .multiship:
-// "foo.multiship" -> "foo.session", anything else -> "<path>.session".
-static std::string SessionPathFor(const std::string& multishipPath) {
-    const std::string ext = ".multiship";
-    if (multishipPath.size() >= ext.size() &&
-        multishipPath.compare(multishipPath.size() - ext.size(), ext.size(), ext) == 0) {
-        return multishipPath.substr(0, multishipPath.size() - ext.size()) + ".session";
-    }
-    return multishipPath + ".session";
-}
-
-// The single entry point into the server for BOTH the Create-finalize step and the
-// menu file picker: read the .multiship back from disk and arm routing with its
-// matching .session file. Reading from disk (instead of reusing an in-memory
-// Fill::Result) guarantees the server state is byte-identical regardless of how we
-// got here — notably the per-RSK settings block, which the old in-memory Create
-// hand-off dropped, producing a broken world on "Continue to server".
-static bool ArmServerFromFile(Server& server, const std::string& multishipPath,
-                              SeedFile::Loaded& out, std::string& err) {
-    if (!SeedFile::ReadMultiship(multishipPath, out, err)) return false;
-    server.LoadSession(out, SessionPathFor(multishipPath));
-    return true;
 }
 
 enum class Screen { Menu, Create, ServerView };
@@ -265,43 +231,26 @@ int main(int, char**) {
 
     // --- create-seed state (2 players for now; designed to extend to N) ---
     char playerNames[2][64] = { "Player 1", "Player 2" };
-    // One chosen value per implemented setting (see Rando::MultiShipSettings()),
-    // initialized to each setting's default.
-    std::vector<uint8_t> settingValues;
-    for (const auto& spec : Rando::MultiShipSettings()) settingValues.push_back(spec.defaultValue);
-    char settingsFilter[64] = "";  // live search box over the (large) settings list
-    std::vector<Fill::SettingOverride> genOverrides;  // captured at Create time for the worker
     std::string createStatus;
-    std::string presetStatus;      // feedback for Save/Load Preset (separate from createStatus)
+    std::string presetStatus;      // feedback for Save/Load Preset
+
+    // Preset templates discovered in kPresetDir, refreshed on demand.
+    std::vector<std::string> presetTemplates = ScanPresetTemplates();
+    int presetTemplateIdx = -1;
+
     bool seedReady = false;        // a seed has been created or loaded
     uint64_t activeSeed = 0;
     std::vector<std::string> activePlayers;
     int activePlacements = 0;
     std::string activeSource;      // where it came from (created file / loaded path)
 
-    // --- background generation (Fill::Generate blocks, so it runs off the UI thread) ---
-    std::thread genThread;
-    std::atomic<bool> genRunning{ false };   // worker active (UI shows the progress bar)
-    std::atomic<bool> genFinished{ false };  // worker done; UI joins + finalizes
-    std::atomic<float> genFrac{ 0.0f };
-    std::mutex genStageMutex;
-    std::string genStage;
-    uint64_t genSeed = 0;
-    std::vector<std::string> genPlayers;
-    Fill::Result genResult;
-    bool genWriteOk = false;
-    std::string genWriteErr;
-    std::string genBase;
-
     // --- server-view state ---
     int port = 43384;
     bool autoScroll = true;
 #ifdef MULTISHIP_DEBUG
-    char itemName[64] = "";
+    int itemIdx = -1;             // index into ItemCatalog::Items() (-1 = none chosen)
     char playerName[64] = "";
-    int iceModelIdx = -1;
-    int iceTextIdx = -1;
-    int warpDestIdx = 7;  // default to "Castle Grounds / Ganon's Castle" (bridge test)
+    int warpDestIdx = 7;          // default to "Castle Grounds / Ganon's Castle" (bridge test)
 #endif
 
     bool running = true;
@@ -313,37 +262,6 @@ int main(int, char**) {
             if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE &&
                 event.window.windowID == SDL_GetWindowID(window))
                 running = false;
-        }
-
-        // Generation finished on the worker thread -> join and publish the result.
-        if (genFinished.load() && genThread.joinable()) {
-            genThread.join();
-            genRunning = false;
-            genFinished = false;
-            genBase = std::to_string(genSeed);
-            if (genWriteOk) {
-                // Arm routing by reading the file we just wrote back through the same
-                // path the menu file picker uses, so Create -> Continue produces server
-                // state identical to loading that .multiship by hand. The active* fields
-                // are sourced from what was actually loaded, not the in-memory Result.
-                const std::string mshipPath = genBase + ".multiship";
-                SeedFile::Loaded ld;
-                std::string loadErr;
-                if (ArmServerFromFile(server, mshipPath, ld, loadErr)) {
-                    createStatus = "Created seed " + genBase +
-                                   (genResult.beatable ? "  (beatable)" : "  (NOT beatable!)") +
-                                   "  ->  " + genBase + ".multiship  +  _spoiler.txt";
-                    seedReady = true;
-                    activeSeed = ld.seed;
-                    activePlayers = ld.players;
-                    activePlacements = (int)ld.placements.size();
-                    activeSource = mshipPath;
-                } else {
-                    createStatus = "Created files but failed to arm server: " + loadErr;
-                }
-            } else {
-                createStatus = "Write failed: " + genWriteErr;
-            }
         }
 
         ImGui_ImplSDLRenderer2_NewFrame();
@@ -359,14 +277,17 @@ int main(int, char**) {
 
         // ===================================================================== MENU
         if (screen == Screen::Menu) {
-            ImGui::TextUnformatted("MultiShip — MultiWorld");
+            ImGui::TextUnformatted("MultiShip");
             ImGui::Separator();
             ImGui::Spacing();
             ImGui::TextWrapped("Choose what to do:");
             ImGui::Spacing();
             if (ImGui::Button("Create a new seed", ImVec2(260, 40))) {
                 createStatus.clear();
+                presetStatus.clear();
                 menuError.clear();
+                presetTemplates = ScanPresetTemplates();
+                presetTemplateIdx = -1;
                 screen = Screen::Create;
             }
             ImGui::Spacing();
@@ -376,7 +297,7 @@ int main(int, char**) {
                 if (!path.empty()) {
                     SeedFile::Loaded ld;
                     std::string err;
-                    if (ArmServerFromFile(server, path, ld, err)) {
+                    if (SeedFile::ReadMultiship(path, ld, err)) {
                         seedReady = true;
                         activeSeed = ld.seed;
                         activePlayers = ld.players;
@@ -396,278 +317,136 @@ int main(int, char**) {
 
         // =================================================================== CREATE
         else if (screen == Screen::Create) {
-            const bool busy = genRunning.load();
-
-            ImGui::TextUnformatted("Create a new MultiWorld seed");
+            ImGui::TextUnformatted("Create a new seed");
             ImGui::Separator();
             ImGui::Spacing();
+
+            // --- Presets (top): pick a template, or save/load a preset file --------
+            ImGui::SeparatorText("Presets");
+            {
+                const char* preview = (presetTemplateIdx >= 0 && presetTemplateIdx < (int)presetTemplates.size())
+                                          ? presetTemplates[presetTemplateIdx].c_str()
+                                          : "(select a template)";
+                ImGui::SetNextItemWidth(360.0f);
+                if (ImGui::BeginCombo("Template", preview)) {
+                    for (int i = 0; i < (int)presetTemplates.size(); ++i) {
+                        const std::string label =
+                            std::filesystem::path(presetTemplates[i]).filename().string();
+                        const bool sel = (presetTemplateIdx == i);
+                        ImGui::PushID(i);
+                        if (ImGui::Selectable(label.c_str(), sel)) {
+                            presetTemplateIdx = i;
+                            std::string err;
+                            if (LoadPreset(presetTemplates[i], playerNames, err))
+                                presetStatus = "Loaded template " + label;
+                            else
+                                presetStatus = "Load failed: " + err;
+                        }
+                        if (sel) ImGui::SetItemDefaultFocus();
+                        ImGui::PopID();
+                    }
+                    if (presetTemplates.empty())
+                        ImGui::TextDisabled("(no *.mspreset.json in '%s')", kPresetDir);
+                    ImGui::EndCombo();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Refresh")) {
+                    presetTemplates = ScanPresetTemplates();
+                    presetTemplateIdx = -1;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Save Preset")) {
+                    std::string path = PickSavePresetFile();
+                    if (!path.empty()) {
+                        std::string err;
+                        if (SavePreset(path, playerNames, err)) {
+                            presetStatus = "Saved preset -> " + path;
+                            presetTemplates = ScanPresetTemplates();
+                        } else {
+                            presetStatus = "Save failed: " + err;
+                        }
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Load Preset")) {
+                    std::string path = PickOpenPresetFile();
+                    if (!path.empty()) {
+                        std::string err;
+                        if (LoadPreset(path, playerNames, err))
+                            presetStatus = "Loaded preset from " + path;
+                        else
+                            presetStatus = "Load failed: " + err;
+                    }
+                }
+                if (!presetStatus.empty())
+                    ImGui::TextDisabled("%s", presetStatus.c_str());
+            }
+
+            ImGui::Spacing();
+            ImGui::SeparatorText("Players");
             ImGui::TextWrapped("Player names (2 worlds):");
-            ImGui::BeginDisabled(busy);
             ImGui::SetNextItemWidth(260.0f);
             ImGui::InputText("Player 1", playerNames[0], sizeof(playerNames[0]));
             ImGui::SetNextItemWidth(260.0f);
             ImGui::InputText("Player 2", playerNames[1], sizeof(playerNames[1]));
-            ImGui::EndDisabled();
+
             ImGui::Spacing();
-
-            // --- Settings (full set, in tabs like the base randomizer) ------------
-            ImGui::SeparatorText("Settings");
-            {
-                const auto& specs = Rando::MultiShipSettings();
-                // Only settings the generator honors are shown; the rest are hidden because
-                // the engine ignores or normalizes them (toggling them would mislead — see
-                // the SUPPORTED list in rando-logic/gen_settings.py, the single source of
-                // truth). Flip a key there to surface it here.
-                size_t supportedCount = 0;
-                for (const auto& sp : specs) if (sp.supported) ++supportedCount;
-                ImGui::SetNextItemWidth(260.0f);
-                ImGui::InputTextWithHint("##settingsfilter", "Filter settings...", settingsFilter,
-                                         sizeof(settingsFilter));
-                ImGui::SameLine();
-                ImGui::TextDisabled("(%zu generator settings)", supportedCount);
-
-                // Lower-cased filter for a case-insensitive substring match.
-                std::string flt = settingsFilter;
-                for (char& ch : flt) ch = (char)std::tolower((unsigned char)ch);
-
-                auto passesFilter = [&](const Rando::SettingSpec& sp) {
-                    if (flt.empty()) return true;
-                    std::string lbl = sp.label;
-                    for (char& ch : lbl) ch = (char)std::tolower((unsigned char)ch);
-                    return lbl.find(flt) != std::string::npos;
-                };
-
-                // RSK key -> index, to resolve a setting's conditional-visibility parent.
-                std::unordered_map<int, size_t> idxOfKey;
-                for (size_t i = 0; i < specs.size(); ++i) idxOfKey[(int)specs[i].key] = i;
-
-                // A dependent setting (e.g. Bridge Medallion Count) is only shown while its
-                // parent (Rainbow Bridge) currently holds one of the values that activate it.
-                auto isVisible = [&](const Rando::SettingSpec& sp) {
-                    if (sp.visibleWhenValues.empty()) return true;
-                    auto it = idxOfKey.find((int)sp.visibleWhenKey);
-                    if (it == idxOfKey.end() || it->second >= settingValues.size()) return true;
-                    uint8_t cur = settingValues[it->second];
-                    for (uint8_t v : sp.visibleWhenValues)
-                        if (v == cur) return true;
-                    return false;
-                };
-
-                // Draw one setting. On/Off toggles render as a single-line checkbox;
-                // everything else as a labelled full-width slider/dropdown. The whole
-                // control is grouped so its SoH description shows as a hover tooltip.
-                auto renderSetting = [&](size_t i) {
-                    const Rando::SettingSpec& sp = specs[i];
-                    ImGui::PushID((int)i);
-                    ImGui::BeginGroup();
-                    if (sp.IsToggle()) {
-                        const uint8_t on = sp.OnValue();
-                        bool checked = (settingValues[i] == on);
-                        if (ImGui::Checkbox(sp.label, &checked))
-                            settingValues[i] = checked ? on : (uint8_t)(on ? 0 : 1);
-                    } else {
-                        ImGui::TextUnformatted(sp.label);
-                        ImGui::SetNextItemWidth(-FLT_MIN);
-                        if (sp.IsNumeric()) {
-                            int v = settingValues[i];
-                            if (ImGui::SliderInt("##w", &v, sp.numMin, sp.numMax))
-                                settingValues[i] = (uint8_t)v;
-                        } else {
-                            const char* cur = "?";
-                            for (const auto& c : sp.choices)
-                                if (c.value == settingValues[i]) cur = c.label;
-                            if (ImGui::BeginCombo("##w", cur)) {
-                                for (const auto& c : sp.choices) {
-                                    const bool sel = (c.value == settingValues[i]);
-                                    if (ImGui::Selectable(c.label, sel)) settingValues[i] = c.value;
-                                    if (sel) ImGui::SetItemDefaultFocus();
-                                }
-                                ImGui::EndCombo();
-                            }
-                        }
-                    }
-                    ImGui::EndGroup();
-                    if (sp.tooltip && sp.tooltip[0] && ImGui::IsItemHovered()) {
-                        ImGui::BeginTooltip();
-                        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
-                        ImGui::TextUnformatted(sp.tooltip);
-                        ImGui::PopTextWrapPos();
-                        ImGui::EndTooltip();
-                    }
-                    ImGui::PopID();
-                };
-
-                // Reserve space at the bottom for the action bar, so the tabs fill the
-                // rest of the window and the buttons stay anchored at the bottom.
-                float footer = 52.0f;
-                if (busy) footer += 50.0f;
-                if (!createStatus.empty()) footer += 66.0f;
-                if (!presetStatus.empty()) footer += 24.0f;
-                float settingsH = ImGui::GetContentRegionAvail().y - footer;
-                if (settingsH < 160.0f) settingsH = 160.0f;
-
-                ImGui::BeginDisabled(busy);
-                ImGui::BeginChild("ms_settings_area", ImVec2(0, settingsH), ImGuiChildFlags_Borders);
-                if (ImGui::BeginTabBar("ms_tabs")) {
-                    for (const char* tab : Rando::SettingTabOrder()) {
-                        // Drop tabs with no honored settings (e.g. all-unsupported tabs like
-                        // Hints/Traps or Starting Items) so empty tabs never appear.
-                        bool tabHasSupported = false;
-                        for (const auto& sp : specs)
-                            if (sp.supported && std::strcmp(sp.tab, tab) == 0) { tabHasSupported = true; break; }
-                        if (!tabHasSupported) continue;
-
-                        if (!ImGui::BeginTabItem(tab)) continue;
-                        ImGui::BeginChild("tabscroll", ImVec2(0, 0));
-
-                        // How many logical columns does this tab use (per the OG menu)?
-                        int numCols = 1;
-                        for (const auto& sp : specs)
-                            if (sp.supported && std::strcmp(sp.tab, tab) == 0 && passesFilter(sp) &&
-                                isVisible(sp) && (int)sp.column + 1 > numCols)
-                                numCols = (int)sp.column + 1;
-
-                        // Responsive: shrink to fit narrow windows (each column wants ~260px).
-                        float avail = ImGui::GetContentRegionAvail().x;
-                        int displayCols = numCols;
-                        while (displayCols > 1 && avail / displayCols < 260.0f) --displayCols;
-
-                        if (ImGui::BeginTable("t", displayCols,
-                                              ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX)) {
-                            ImGui::TableNextRow();
-                            for (int tc = 0; tc < displayCols; ++tc) {
-                                ImGui::TableNextColumn();
-                                // Logical columns assigned to this table cell (round-robin
-                                // when the window is too narrow to show them all side by side).
-                                for (int lc = tc; lc < numCols; lc += displayCols) {
-                                    const char* curSection = nullptr;
-                                    for (size_t i = 0; i < specs.size() && i < settingValues.size(); ++i) {
-                                        const Rando::SettingSpec& sp = specs[i];
-                                        if (!sp.supported) continue;  // hidden: generator ignores it
-                                        if (std::strcmp(sp.tab, tab) != 0 || (int)sp.column != lc) continue;
-                                        if (!passesFilter(sp)) continue;
-                                        if (!isVisible(sp)) continue;
-                                        if (sp.section && sp.section[0] &&
-                                            (!curSection || std::strcmp(curSection, sp.section) != 0)) {
-                                            ImGui::SeparatorText(sp.section);
-                                        }
-                                        curSection = sp.section;
-                                        renderSetting(i);
-                                    }
-                                }
-                            }
-                            ImGui::EndTable();
-                        }
-                        ImGui::EndChild();
-                        ImGui::EndTabItem();
-                    }
-                    ImGui::EndTabBar();
-                }
-                ImGui::EndChild();
-                ImGui::EndDisabled();
-            }
             ImGui::Separator();
-
-            ImGui::BeginDisabled(busy);
             if (ImGui::Button("Create Seed", ImVec2(160, 32))) {
-                // Reset progress + capture inputs, then generate off the UI thread so
-                // the window keeps redrawing the progress bar.
                 createStatus.clear();
-                genFrac = 0.0f;
-                { std::lock_guard<std::mutex> lk(genStageMutex); genStage = "Starting..."; }
-                std::random_device rd;
-                genSeed = ((uint64_t)rd() << 32) ^ rd();
-                genPlayers = { playerNames[0], playerNames[1] };
-                // Snapshot the chosen settings as overrides for the worker thread.
-                genOverrides.clear();
-                {
-                    const auto& specs = Rando::MultiShipSettings();
-                    for (size_t i = 0; i < specs.size() && i < settingValues.size(); ++i)
-                        genOverrides.push_back({ (uint16_t)specs[i].key, settingValues[i] });
-                }
                 seedReady = false;
-                genFinished = false;
-                genRunning = true;
-                genThread = std::thread([&] {
-                    Fill::Result r = Fill::Generate(genSeed, 2, genOverrides, [&](float f, const char* s) {
-                        genFrac = f;
-                        std::lock_guard<std::mutex> lk(genStageMutex);
-                        genStage = s;
-                    });
-                    {
-                        std::lock_guard<std::mutex> lk(genStageMutex);
-                        genStage = "Writing seed files...";
+                std::random_device rd;
+                uint64_t seed = ((uint64_t)rd() << 32) ^ rd();
+                std::vector<std::string> players = { playerNames[0], playerNames[1] };
+                // Build the file name as "<player1>_<player2>_<seed>" inside a "seeds/"
+                // subfolder. Player names are sanitized to safe filename characters
+                // (alphanumerics, '-', '.'); anything else is dropped, and an empty name
+                // falls back to "Player".
+                auto sanitize = [](const std::string& s) {
+                    std::string out;
+                    for (char c : s) {
+                        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                            c == '-' || c == '.') {
+                            out += c;
+                        }
                     }
-                    std::string base = std::to_string(genSeed);
-                    std::string err;
-                    bool okBin = SeedFile::WriteMultiship(base + ".multiship", r, genPlayers, err);
-                    bool okTxt = SeedFile::WriteSpoiler(base + "_spoiler.txt", r, genPlayers, err);
-                    genResult = std::move(r);
-                    genWriteOk = okBin && okTxt;
-                    genWriteErr = err;
-                    genFrac = 1.0f;
-                    {
-                        std::lock_guard<std::mutex> lk(genStageMutex);
-                        genStage = "Done";
+                    return out.empty() ? std::string("Player") : out;
+                };
+                std::string namePart = sanitize(playerNames[0]) + "_" + sanitize(playerNames[1]);
+                std::error_code mkdirEc;
+                std::filesystem::create_directories("seeds", mkdirEc);
+                std::string base =
+                    (std::filesystem::path("seeds") / (namePart + "_" + std::to_string(seed))).string();
+                std::string err;
+                bool okBin = SeedFile::WriteMultiship(base + ".multiship", seed, players, err);
+                bool okTxt = SeedFile::WriteSpoiler(base + "_spoiler.txt", seed, players, err);
+                if (okBin && okTxt) {
+                    // Read the file back so the Server view reflects exactly what was written.
+                    SeedFile::Loaded ld;
+                    std::string lerr;
+                    if (SeedFile::ReadMultiship(base + ".multiship", ld, lerr)) {
+                        seedReady = true;
+                        activeSeed = ld.seed;
+                        activePlayers = ld.players;
+                        activePlacements = (int)ld.placements.size();
+                        activeSource = base + ".multiship";
+                        createStatus = "Created seed " + base + "  ->  " + base +
+                                       ".multiship  +  _spoiler.txt";
+                    } else {
+                        createStatus = "Created files but failed to read back: " + lerr;
                     }
-                    genFinished = true;
-                });
+                } else {
+                    createStatus = "Write failed: " + err;
+                }
             }
-            ImGui::EndDisabled();
             ImGui::SameLine();
-            ImGui::BeginDisabled(busy || !seedReady);
+            ImGui::BeginDisabled(!seedReady);
             if (ImGui::Button("Continue to server", ImVec2(180, 32))) {
                 screen = Screen::ServerView;
             }
             ImGui::EndDisabled();
             ImGui::SameLine();
-            ImGui::BeginDisabled(busy);
             if (ImGui::Button("Back", ImVec2(80, 32))) screen = Screen::Menu;
-            ImGui::EndDisabled();
-
-            // --- Settings presets: save the current form to JSON / load one back ---
-            ImGui::SameLine();
-            ImGui::BeginDisabled(busy);
-            if (ImGui::Button("Save Preset", ImVec2(110, 32))) {
-                std::string path = PickSavePresetFile();
-                if (!path.empty()) {
-                    std::string err;
-                    if (SavePreset(path, settingValues, playerNames, err))
-                        presetStatus = "Saved preset -> " + path;
-                    else
-                        presetStatus = "Save failed: " + err;
-                }
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Load Preset", ImVec2(110, 32))) {
-                std::string path = PickOpenPresetFile();
-                if (!path.empty()) {
-                    int applied = 0;
-                    std::string err;
-                    if (LoadPreset(path, settingValues, playerNames, applied, err))
-                        presetStatus = "Loaded " + std::to_string(applied) + " setting(s) from " + path;
-                    else
-                        presetStatus = "Load failed: " + err;
-                }
-            }
-            ImGui::EndDisabled();
-
-            if (!presetStatus.empty()) {
-                ImGui::Spacing();
-                ImGui::TextDisabled("%s", presetStatus.c_str());
-            }
-
-            // Live progress while the worker runs.
-            if (busy) {
-                ImGui::Spacing();
-                std::string stage;
-                { std::lock_guard<std::mutex> lk(genStageMutex); stage = genStage; }
-                float frac = genFrac.load();
-                char overlay[32];
-                std::snprintf(overlay, sizeof(overlay), "%.0f%%", frac * 100.0f);
-                ImGui::ProgressBar(frac, ImVec2(-FLT_MIN, 0), overlay);
-                ImGui::TextDisabled("%s", stage.c_str());
-            }
 
             if (!createStatus.empty()) {
                 ImGui::Spacing();
@@ -719,48 +498,28 @@ int main(int, char**) {
 #ifdef MULTISHIP_DEBUG
             // Debug-only tools (built with -DDEBUG=1): manual give-item, the player target,
             // and the region teleport. Hidden in normal builds so players can't self-serve.
-            // Manual give-item (unchanged from the original tool).
+            const auto& items = ItemCatalog::Items();
             ImGui::BeginDisabled(!isRunning || server.ClientCount() == 0);
-            ImGui::InputText("Item (RandomizerGet name)", itemName, sizeof(itemName));
-            ImGui::InputText("Player (empty = everyone)", playerName, sizeof(playerName));
-            const bool isIceTrap = std::string(itemName) == "RG_ICE_TRAP";
-            if (isIceTrap) {
-                auto shortLabel = [](const char* s) {
-                    std::string str = s;
-                    return str.size() > 60 ? str.substr(0, 57) + "..." : str;
-                };
-                const char* modelPreview = iceModelIdx < 0 ? "(Random)" : IceTrap::ModelDisplayName(iceModelIdx);
-                if (ImGui::BeginCombo("Ice Trap Model", modelPreview)) {
-                    if (ImGui::Selectable("(Random)", iceModelIdx < 0)) iceModelIdx = -1;
-                    for (int i = 0; i < IceTrap::ModelCount(); ++i) {
-                        ImGui::PushID(i);
-                        if (ImGui::Selectable(IceTrap::ModelDisplayName(i), iceModelIdx == i)) iceModelIdx = i;
-                        ImGui::PopID();
-                    }
-                    ImGui::EndCombo();
+            const char* itemPreview = (itemIdx >= 0 && itemIdx < (int)items.size())
+                                          ? items[itemIdx].name : "(select item)";
+            ImGui::SetNextItemWidth(260.0f);
+            if (ImGui::BeginCombo("Item", itemPreview)) {
+                for (int i = 0; i < (int)items.size(); ++i) {
+                    if (items[i].rg == RG_NONE || items[i].rg == RG_MAX) continue;
+                    const bool sel = (itemIdx == i);
+                    ImGui::PushID(i);
+                    if (ImGui::Selectable(items[i].name, sel)) itemIdx = i;
+                    if (sel) ImGui::SetItemDefaultFocus();
+                    ImGui::PopID();
                 }
-                std::string textPreview = iceTextIdx < 0 ? std::string("(Random)") : shortLabel(IceTrap::TextLabel(iceTextIdx));
-                if (ImGui::BeginCombo("Ice Trap Text", textPreview.c_str())) {
-                    if (ImGui::Selectable("(Random)", iceTextIdx < 0)) iceTextIdx = -1;
-                    for (int i = 0; i < IceTrap::TextCount(); ++i) {
-                        ImGui::PushID(i);
-                        if (ImGui::Selectable(shortLabel(IceTrap::TextLabel(i)).c_str(), iceTextIdx == i)) iceTextIdx = i;
-                        ImGui::PopID();
-                    }
-                    ImGui::EndCombo();
-                }
+                ImGui::EndCombo();
             }
-            ImGui::BeginDisabled(itemName[0] == '\0');
+            ImGui::InputText("Player (empty = everyone)", playerName, sizeof(playerName));
+            ImGui::BeginDisabled(itemIdx < 0);
             if (ImGui::Button("Send Item")) {
                 nlohmann::json payload;
                 payload["type"] = "command";
-                payload["command"] = std::string("give_item randomizer ") + itemName;
-                if (isIceTrap) {
-                    int modelIndex = iceModelIdx < 0 ? IceTrap::RandomModelIndex() : iceModelIdx;
-                    int textIndex = iceTextIdx < 0 ? IceTrap::RandomTextIndex() : iceTextIdx;
-                    payload["iceTrapModel"] = IceTrap::ModelRgName(modelIndex);
-                    payload["iceTrapText"] = IceTrap::ComposeText(modelIndex, textIndex);
-                }
+                payload["command"] = std::string("give_item randomizer ") + items[itemIdx].name;
                 if (playerName[0] != '\0') server.UnicastToClient(playerName, payload.dump());
                 else server.BroadcastToClients(payload.dump());
             }
@@ -817,7 +576,6 @@ int main(int, char**) {
         SDL_RenderPresent(renderer);
     }
 
-    if (genThread.joinable()) genThread.join();   // wait out any in-flight generation
     server.Stop();
     ImGui_ImplSDLRenderer2_Shutdown();
     ImGui_ImplSDL2_Shutdown();

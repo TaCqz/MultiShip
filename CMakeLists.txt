@@ -75,27 +75,12 @@ elseif(TARGET SDL2::SDL2)
 endif()
 
 # ------------------------------------------------------------------------------
-# Rando engine — clean-room port of the Ship of Harkinian randomizer logic +
-# multiworld assumed-fill + .multiship/spoiler IO. No SDL/ImGui dependency, so it
-# builds standalone and the headless MultiShipGen CLI links only this.
+# Seed IO library (reset baseline). The randomization engine was removed; this is
+# now just the .multiship/spoiler reader/writer plus the kept RG_ item catalog.
+# No SDL/ImGui dependency, so it builds standalone.
 # ------------------------------------------------------------------------------
-file(GLOB MULTISHIP_RANDO_SOURCES CONFIGURE_DEPENDS
-    src/rando/Logic.cpp
-    src/rando/LogicState.cpp
-    src/rando/RegionGraph.cpp
-    src/rando/Search.cpp
-    src/rando/Fill.cpp
-    src/rando/SeedFile.cpp
-    src/rando/Session.cpp
-    src/rando/location_access/*.cpp
-    src/rando/location_access/*/*.cpp
-)
-add_library(multiship_rando STATIC ${MULTISHIP_RANDO_SOURCES})
+add_library(multiship_rando STATIC src/rando/SeedFile.cpp)
 target_include_directories(multiship_rando PUBLIC src)
-
-# Standalone headless CLI seed generator.
-add_executable(MultiShipGen src/rando/gen_main.cpp)
-target_link_libraries(MultiShipGen PRIVATE multiship_rando)
 
 # ------------------------------------------------------------------------------
 # Desktop GUI server (optional) — Dear ImGui (pinned) + SDL2 / SDL_Renderer
@@ -129,7 +114,6 @@ if(MULTISHIP_BUILD_GUI)
     add_executable(MultiShip
         src/main.cpp
         src/Server.cpp
-        src/IceTrap.cpp
     )
     target_include_directories(MultiShip PRIVATE src)
     target_link_libraries(MultiShip PRIVATE
@@ -162,7 +146,6 @@ endif()
 add_executable(MultiShipCLI
     src/main_cli.cpp
     src/Server.cpp
-    src/IceTrap.cpp
 )
 
 target_include_directories(MultiShipCLI PRIVATE src)

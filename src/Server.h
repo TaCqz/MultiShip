@@ -10,9 +10,6 @@
 #include <utility>
 #include <vector>
 
-#include "rando/Session.h"
-#include "rando/SeedFile.h"
-
 // A small TCP server that accepts connections from ShipwreckCombo's MultiShip
 // network module and reads its NUL-delimited ('\0') JSON packets.
 //
@@ -57,33 +54,9 @@ class Server {
     // BroadcastToClients.
     void UnicastToClient(const std::string& clientName, const std::string& payload);
 
-    // Binds the multiworld delivery engine to a loaded seed. `sessionPath` is where
-    // the engine persists collection history (a .session file next to the
-    // .multiship), so deliveries survive a server restart. Thread-safe; can be
-    // called before or after Start(). Pass an empty sessionPath to route without
-    // on-disk persistence (in-memory only).
-    void LoadSession(const SeedFile::Loaded& seed, const std::string& sessionPath);
-    bool HasSession() const { return mHasSession.load(); }
-
   private:
     void Run(uint16_t port);
     void Log(const std::string& line);
-
-    // A client in `userName`'s world collected location `check`; route the item at
-    // that location to its owner and queue the delivery.
-    void OnCheckCollected(const std::string& userName, int check);
-
-    // A client (re)loaded/connected reporting the highest delivery seq it has
-    // applied; re-send everything past it (crash-safe catch-up).
-    void OnPlayerSync(const std::string& userName, uint32_t receivedSeq);
-
-    // Builds a give_item command for one routed item and queues it to `player`.
-    void DeliverItem(const std::string& player, int itemId, uint32_t seq);
-
-    // Sends `player` the full placement list for their world so their client can
-    // show the right item at each location locally (items are still delivered
-    // remotely). Sent on sync, before the item catch-up.
-    void SendWorldPlacements(const std::string& player, int world);
 
     std::thread mThread;
     std::atomic<bool> mRunning{ false };
@@ -98,12 +71,6 @@ class Server {
     std::mutex mOutMutex;
     std::vector<std::string> mPendingBroadcasts;
     std::vector<std::pair<std::string, std::string>> mPendingUnicasts;
-
-    // Multiworld delivery engine. Guarded by mSessionMutex because LoadSession() can
-    // be called from the UI thread while the server thread routes packets.
-    mutable std::mutex mSessionMutex;
-    Rando::Session mSession;
-    std::atomic<bool> mHasSession{ false };
 };
 
 #endif // MULTISHIP_SERVER_H

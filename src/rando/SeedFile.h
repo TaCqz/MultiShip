@@ -70,6 +70,14 @@ const char* SettingKeyName(uint16_t key);
 bool WriteMultiship(const std::string& path, const SeedData& data, std::string& err);
 bool ReadMultiship(const std::string& path, SeedData& out, std::string& err);
 
+// Serialize SeedData to the EXACT v3 byte layout WriteMultiship persists to disk,
+// returned as an in-memory byte buffer for the server->client wire. Both this and
+// WriteMultiship go through the same serializer, so the wire bytes are byte-for-byte
+// identical to the .multiship file (file == wire, no drift). The transport may
+// re-encode this buffer (e.g. base64) to survive a text / NUL-delimited channel; the
+// DECODED bytes are what match the file. See docs/multiship-wire-v3.md.
+std::string SerializeToBytes(const SeedData& data);
+
 // Human-readable spoiler log: seed id, players, settings (by name), and every
 // placement grouped by the world its location belongs to, labelled with the owner.
 bool WriteSpoiler(const std::string& path, const SeedData& data, std::string& err);

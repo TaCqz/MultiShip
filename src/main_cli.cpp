@@ -134,6 +134,11 @@ int main(int argc, char** argv) {
     }
 
     Server server;
+    // Arm 'Start Multiworld Save' before listening so clients can claim worlds the
+    // moment they connect (the server pushes the byte-identical v3 SeedData on request).
+    if (haveSeed) {
+        server.SetSeed(loadedSeed);
+    }
     if (!server.Start(static_cast<uint16_t>(port))) {
         // Server::Start already logged the reason it couldn't bind.
         SDLNet_Quit();

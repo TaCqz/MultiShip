@@ -80,6 +80,13 @@ settingCount:u16   | per setting:   rskKey:u16, value:u16
 The contract round-trips byte-for-byte through `WriteMultiship` / `ReadMultiship`
 (asserted by `src/rando/_test/smoke_foundation.cpp`).
 
+**Wire (F-035):** the server→client push reuses this EXACT serializer via
+`SeedFile::SerializeToBytes` (shares `SerializeV3` with `WriteMultiship`), so the wire
+bytes are byte-identical to the `.multiship` file (the smoke test asserts `file == wire`).
+The transport base64-wraps those bytes in a JSON envelope because the channel is
+NUL-delimited; see `docs/multiship-wire-v3.md` for the request/response messages, the
+world-lock semantics, and the exact decoded byte layout the SoH client deserializes.
+
 ## Determinism
 
 Same `(seed, players, settings)` ⇒ byte-identical `SeedData`. The fill, the ice-trap

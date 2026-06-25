@@ -12,9 +12,49 @@ namespace {
 struct ClientConn {
     TCPsocket socket = nullptr;
     std::string buffer;
-    std::string label;    // host:port, used until the player's name is known
-    std::string userName; // name sent by the client in its connection handshake
+    std::string label;       // host:port, used until the player's name is known
+    std::string userName;    // name sent by the client in its connection handshake
+    uint64_t id = 0;         // per-session connection id (owns its world lock, if any)
+    std::string lockedName;  // player/world this connection has locked, "" if none
 };
+
+// Standard base64 (RFC 4648, '+' '/' alphabet, '=' padding). The v3 SeedData is raw
+// binary and freely contains '\0', so it can't ride the NUL-delimited transport
+// directly; we base64 it into a JSON string field. The client base64-decodes back to
+// the byte-identical v3 bytes before deserializing. (Encode only — the client decodes.)
+std::string Base64Encode(const std::string& in) {
+    static const char tbl[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((in.size() + 2) / 3) * 4);
+    const size_t n = in.size();
+    size_t i = 0;
+    for (; i + 3 <= n; i += 3) {
+        unsigned v = ((unsigned)(unsigned char)in[i] << 16) |
+                     ((unsigned)(unsigned char)in[i + 1] << 8) |
+                     (unsigned)(unsigned char)in[i + 2];
+        out.push_back(tbl[(v >> 18) & 63]);
+        out.push_back(tbl[(v >> 12) & 63]);
+        out.push_back(tbl[(v >> 6) & 63]);
+        out.push_back(tbl[v & 63]);
+    }
+    const size_t rem = n - i;
+    if (rem == 1) {
+        unsigned v = (unsigned)(unsigned char)in[i] << 16;
+        out.push_back(tbl[(v >> 18) & 63]);
+        out.push_back(tbl[(v >> 12) & 63]);
+        out.push_back('=');
+        out.push_back('=');
+    } else if (rem == 2) {
+        unsigned v = ((unsigned)(unsigned char)in[i] << 16) |
+                     ((unsigned)(unsigned char)in[i + 1] << 8);
+        out.push_back(tbl[(v >> 18) & 63]);
+        out.push_back(tbl[(v >> 12) & 63]);
+        out.push_back(tbl[(v >> 6) & 63]);
+        out.push_back('=');
+    }
+    return out;
+}
 
 // Keep player names to a single short, printable line so a client cannot inject
 // newlines or control characters into the server log.
@@ -92,6 +132,15 @@ void Server::Run(uint16_t port) {
 
     std::vector<ClientConn> clients;
 
+    // Fresh per-session connection ids and world locks. Clearing here (not just in
+    // SetSeed) means a Stop/Start cycle starts a clean lock session even if the seed
+    // is left in place — ids restart at 1, so no stale id could match a new client.
+    uint64_t nextConnId = 1;
+    {
+        std::lock_guard<std::mutex> lock(mSeedMutex);
+        mWorldLocks.clear();
+    }
+
     Log("[SERVER] Listening on port " + std::to_string(port) + " (all interfaces)");
 
     char recvBuf[1024];
@@ -148,6 +197,7 @@ void Server::Run(uint16_t port) {
                 } else {
                     ClientConn conn;
                     conn.socket = client;
+                    conn.id = nextConnId++;
 
                     IPaddress* remote = SDLNet_TCP_GetPeerAddress(client);
                     if (remote) {
@@ -165,6 +215,15 @@ void Server::Run(uint16_t port) {
                     clients.push_back(std::move(conn));
                     mClientCount.store(static_cast<int>(clients.size()));
                     Log("[SERVER] Client connected: " + clients.back().label);
+
+                    // Tell the new client which world names this seed has, so its
+                    // 'Start Multiworld Save' UI can validate the chosen name before
+                    // claiming. Purely informational: no lock, no full seed pushed.
+                    std::string info = BuildSeedInfoJson();
+                    if (!info.empty()) {
+                        SDLNet_TCP_Send(clients.back().socket, info.c_str(),
+                                        static_cast<int>(info.size()) + 1);
+                    }
                 }
             }
         }
@@ -179,7 +238,13 @@ void Server::Run(uint16_t port) {
 
             int len = SDLNet_TCP_Recv(conn.socket, recvBuf, sizeof(recvBuf));
             if (len <= 0) {
-                Log("[SERVER] Client disconnected: " + (conn.userName.empty() ? conn.label : conn.userName));
+                const std::string who = conn.userName.empty() ? conn.label : conn.userName;
+                // Free this client's world lock so it can be reclaimed (e.g. on reconnect).
+                if (!conn.lockedName.empty()) {
+                    ReleaseLocksFor(conn.id);
+                    Log("[SERVER] Released world lock for '" + conn.lockedName + "' (" + who + " disconnected)");
+                }
+                Log("[SERVER] Client disconnected: " + who);
                 SDLNet_TCP_DelSocket(socketSet, conn.socket);
                 SDLNet_TCP_Close(conn.socket);
                 clients.erase(clients.begin() + i);
@@ -209,6 +274,48 @@ void Server::Run(uint16_t port) {
                         }
                     }
 
+                    // 'Start Multiworld Save': the client claims a player's world by
+                    // name. If the name is in the loaded seed and not already locked to
+                    // another client, lock that world to this connection and push the
+                    // byte-identical v3 SeedData (base64 in a JSON envelope, since the
+                    // transport is NUL-delimited and the seed bytes contain '\0').
+                    if (json.value("type", std::string()) == "start_multiworld_save") {
+                        std::string reqName;
+                        if (json.contains("playerName") && json["playerName"].is_string())
+                            reqName = SanitizeName(json["playerName"].get<std::string>());
+                        if (reqName.empty()) reqName = conn.userName;  // fall back to handshake name
+
+                        const std::string& who0 = conn.userName.empty() ? conn.label : conn.userName;
+                        std::string wire;
+                        int world = -1;
+                        LockResult res = TryLockWorld(reqName, conn.id, wire, world);
+                        if (res == LockResult::Granted) {
+                            conn.lockedName = reqName;
+                            nlohmann::json resp;
+                            resp["type"] = "multiworld_seed";
+                            resp["version"] = (int)SeedFile::kVersion;
+                            resp["worldId"] = world;
+                            resp["playerName"] = reqName;
+                            resp["data"] = Base64Encode(wire);
+                            std::string out = resp.dump();
+                            SDLNet_TCP_Send(conn.socket, out.c_str(), static_cast<int>(out.size()) + 1);
+                            Log("[SERVER] Locked world " + std::to_string(world + 1) + " ('" + reqName +
+                                "') to " + who0 + "; sent v3 seed (" + std::to_string(wire.size()) + " bytes)");
+                        } else {
+                            const char* reason = res == LockResult::DeniedLocked      ? "locked"
+                                               : res == LockResult::DeniedUnknownName ? "unknown_name"
+                                                                                      : "no_seed";
+                            nlohmann::json resp;
+                            resp["type"] = "multiworld_seed_denied";
+                            resp["playerName"] = reqName;
+                            resp["reason"] = reason;
+                            std::string out = resp.dump();
+                            SDLNet_TCP_Send(conn.socket, out.c_str(), static_cast<int>(out.size()) + 1);
+                            Log("[SERVER] Refused 'Start Multiworld Save' for '" + reqName + "' from " +
+                                who0 + ": " + reason);
+                        }
+                    }
+
                     // Reset baseline: the multiworld routing engine is gone, so
                     // incoming hook packets are simply logged (below), not routed.
                     summary = json.dump();
@@ -233,6 +340,11 @@ void Server::Run(uint16_t port) {
     }
     clients.clear();
     mClientCount.store(0);
+    {
+        // Session over: drop all world locks (durable persistence is the later F-039).
+        std::lock_guard<std::mutex> lock(mSeedMutex);
+        mWorldLocks.clear();
+    }
 
     SDLNet_TCP_DelSocket(socketSet, serverSocket);
     SDLNet_TCP_Close(serverSocket);
@@ -270,4 +382,79 @@ void Server::UnicastToClient(const std::string& clientName, const std::string& p
     // Just queue it; the server thread delivers it on its next loop iteration.
     std::lock_guard<std::mutex> lock(mOutMutex);
     mPendingUnicasts.emplace_back(clientName, payload);
+}
+
+void Server::SetSeed(const SeedFile::SeedData& seed) {
+    // Serialize outside the lock — the wire bytes are the EXACT v3 file bytes
+    // (file == wire), so a granted request can be answered straight from the cache.
+    std::string wire = SeedFile::SerializeToBytes(seed);
+    {
+        std::lock_guard<std::mutex> lock(mSeedMutex);
+        mSeedId = seed.seedId;
+        mSeedPlayers = seed.players;
+        mSeedWireV3 = std::move(wire);
+        mHasSeed = true;
+        mWorldLocks.clear();  // a new seed starts a fresh session: drop any prior locks
+    }
+    // Push the (new) world-name list to any clients already connected when the seed
+    // was loaded — the accept path only covers clients that connect afterwards.
+    std::string info = BuildSeedInfoJson();
+    if (!info.empty()) {
+        BroadcastToClients(info);
+    }
+}
+
+void Server::ClearSeed() {
+    std::lock_guard<std::mutex> lock(mSeedMutex);
+    mHasSeed = false;
+    mSeedId.clear();
+    mSeedPlayers.clear();
+    mSeedWireV3.clear();
+    mWorldLocks.clear();
+}
+
+std::string Server::BuildSeedInfoJson() {
+    std::lock_guard<std::mutex> lock(mSeedMutex);
+    if (!mHasSeed) {
+        return std::string();
+    }
+    nlohmann::json info;
+    info["type"] = "multiworld_seed_info";
+    info["seedId"] = mSeedId;
+    info["players"] = mSeedPlayers;  // index = world id
+    return info.dump();
+}
+
+Server::LockResult Server::TryLockWorld(const std::string& name, uint64_t connId,
+                                        std::string& outWire, int& outWorld) {
+    std::lock_guard<std::mutex> lock(mSeedMutex);
+    if (!mHasSeed) {
+        return LockResult::DeniedNoSeed;
+    }
+    int world = -1;
+    for (size_t i = 0; i < mSeedPlayers.size(); ++i) {
+        if (mSeedPlayers[i] == name) { world = static_cast<int>(i); break; }
+    }
+    if (world < 0) {
+        return LockResult::DeniedUnknownName;
+    }
+    auto it = mWorldLocks.find(name);
+    if (it != mWorldLocks.end() && it->second != connId) {
+        return LockResult::DeniedLocked;  // held by a different client
+    }
+    mWorldLocks[name] = connId;  // claim it (or re-affirm for the same connection)
+    outWire = mSeedWireV3;
+    outWorld = world;
+    return LockResult::Granted;
+}
+
+void Server::ReleaseLocksFor(uint64_t connId) {
+    std::lock_guard<std::mutex> lock(mSeedMutex);
+    for (auto it = mWorldLocks.begin(); it != mWorldLocks.end();) {
+        if (it->second == connId) {
+            it = mWorldLocks.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }

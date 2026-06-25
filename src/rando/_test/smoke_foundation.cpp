@@ -11,6 +11,8 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -92,6 +94,14 @@ int main() {
         settingsOk = ld.settings[i].key == curated[i].key &&
                      ld.settings[i].value == curated[i].value;
     check(settingsOk, "curated settings round-trip (RSK key -> option index)");
+
+    // file == wire: the in-memory wire serializer (server->client path) must produce the
+    // EXACT same bytes as the .multiship file, so the SoH client deserializes one format.
+    std::ifstream f(bin, std::ios::binary);
+    std::string fileBytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    std::string wireBytes = SeedFile::SerializeToBytes(g.seed);
+    check(!wireBytes.empty(), "SerializeToBytes produced bytes");
+    check(fileBytes == wireBytes, "SerializeToBytes == .multiship file bytes (file == wire)");
 
     std::printf("\n%s (%d failure(s))\n", failures == 0 ? "ALL PASS" : "FAILED", failures);
     return failures == 0 ? 0 : 1;

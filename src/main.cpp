@@ -356,6 +356,9 @@ int main(int, char**) {
     std::vector<std::string> activePlayers;
     int activePlacements = 0;
     std::string activeSource;      // where it came from (created file / loaded path)
+    // The full loaded/created contract, handed to the server (server.SetSeed) so it can
+    // answer 'Start Multiworld Save' requests with the byte-identical v3 SeedData.
+    SeedFile::Loaded activeSeedData;
 
     // --- async seed generation ---------------------------------------------------
     // Generation runs the multiworld fill, which takes a noticeable moment. Doing it
@@ -437,6 +440,8 @@ int main(int, char**) {
                         activePlayers = ld.players;
                         activePlacements = (int)ld.placements.size();
                         activeSource = path;
+                        activeSeedData = ld;
+                        server.SetSeed(ld);  // arm 'Start Multiworld Save' for this seed
                         screen = Screen::ServerView;
                     } else {
                         menuError = "Failed to load: " + err;
@@ -454,6 +459,13 @@ int main(int, char**) {
             ImGui::TextUnformatted("Create a new seed");
             ImGui::Separator();
             ImGui::Spacing();
+
+            // While a seed is generating, lock everything that feeds it — the curated
+            // settings, the player names, and the preset/template buttons — so it can't
+            // be changed mid-generation (the worker already captured these values). They
+            // re-enable automatically once generation finishes.
+            const bool generating = genActive.load();
+            ImGui::BeginDisabled(generating);
 
             // --- Presets (top): pick a template, or save/load a preset file --------
             ImGui::SeparatorText("Presets");
@@ -569,6 +581,10 @@ int main(int, char**) {
             }
             ImGui::EndChild();
 
+            // End of the generation-locked inputs. The action buttons below stay live
+            // (during generation they're replaced by the progress bar anyway).
+            ImGui::EndDisabled();
+
             ImGui::Spacing();
             ImGui::Separator();
             // Harvest a finished background generation: the worker published its result,
@@ -584,6 +600,8 @@ int main(int, char**) {
                     activePlayers = genLoaded.players;
                     activePlacements = (int)genLoaded.placements.size();
                     activeSource = genBase + ".multiship";
+                    activeSeedData = genLoaded;
+                    server.SetSeed(genLoaded);  // arm 'Start Multiworld Save' for this seed
                 }
             }
 

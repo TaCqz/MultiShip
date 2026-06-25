@@ -2,6 +2,7 @@
 #include "rando/MetaData.h"
 
 #include <fstream>
+#include <sstream>
 #include <unordered_map>
 
 namespace SeedFile {
@@ -50,9 +51,11 @@ const char* SettingKeyName(uint16_t key) {
     return "RSK_NONE";
 }
 
-bool WriteMultiship(const std::string& path, const SeedData& data, std::string& err) {
-    std::ofstream o(path, std::ios::binary);
-    if (!o) { err = "cannot open " + path; return false; }
+// THE single v3 serializer. Both the .multiship file writer (WriteMultiship) and the
+// server->client wire path (SerializeToBytes) go through this, so the bytes they
+// produce are identical — file == wire, no drift. Bump kVersion + this layout
+// together if the schema ever changes.
+static void SerializeV3(std::ostream& o, const SeedData& data) {
     o.write(kMagic, 4);
     wr<uint32_t>(o, kVersion);
     wr<uint64_t>(o, data.seed);
@@ -74,8 +77,22 @@ bool WriteMultiship(const std::string& path, const SeedData& data, std::string& 
         wr<uint16_t>(o, s.key);
         wr<uint16_t>(o, s.value);
     }
+}
+
+bool WriteMultiship(const std::string& path, const SeedData& data, std::string& err) {
+    std::ofstream o(path, std::ios::binary);
+    if (!o) { err = "cannot open " + path; return false; }
+    SerializeV3(o, data);
     if (!o) { err = "write error"; return false; }
     return true;
+}
+
+std::string SerializeToBytes(const SeedData& data) {
+    // Plain ostringstream: string streams never do text/newline translation, so the
+    // bytes match the binary-mode ofstream WriteMultiship uses, byte for byte.
+    std::ostringstream o;
+    SerializeV3(o, data);
+    return o.str();
 }
 
 bool ReadMultiship(const std::string& path, SeedData& out, std::string& err) {

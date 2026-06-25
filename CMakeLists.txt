@@ -113,6 +113,7 @@ if(MULTISHIP_BUILD_GUI)
 
     add_executable(MultiShip
         src/main.cpp
+        src/CuratedSettings.cpp
         src/Server.cpp
     )
     target_include_directories(MultiShip PRIVATE src)

@@ -18,6 +18,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cfloat>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -26,6 +27,7 @@
 #include <vector>
 
 #include "Server.h"
+#include "CuratedSettings.h"
 #include "rando/SeedFile.h"
 #include "rando/ItemNames.h"
 
@@ -86,15 +88,23 @@ static std::string PickOpenPresetFile() {
 }
 
 // --- Settings presets ----------------------------------------------------------------
-// With the randomizer settings gone, a preset effectively round-trips the player
-// names. The JSON shape/plumbing is kept (version + players + an empty settings
-// object, keyed by RSK enum name when settings return), so existing tooling and a
-// future settings block stay compatible.
-static bool SavePreset(const std::string& path, const char playerNames[2][64], std::string& err) {
+// A preset round-trips the player names plus the curated randomizer settings. The
+// "settings" object is keyed by the base SoH RSK enum name (e.g. "RSK_STARTING_AGE")
+// -> stored value, so the same keys can later flow into the .multiship file and the
+// client. `values` is parallel to ms::CuratedSettings() (one int per entry).
+static bool SavePreset(const std::string& path, const char playerNames[2][64],
+                       const std::vector<int>& values, std::string& err) {
+    const auto& settings = ms::CuratedSettings();
     nlohmann::json j;
     j["multiship_preset_version"] = 1;
     j["players"] = { std::string(playerNames[0]), std::string(playerNames[1]) };
-    j["settings"] = nlohmann::json::object();  // none in the reset baseline
+
+    // Serialize every curated value, including the hidden/fixed ones, so a preset
+    // fully documents the intended generation settings.
+    nlohmann::json s = nlohmann::json::object();
+    for (size_t i = 0; i < settings.size() && i < values.size(); ++i)
+        s[ms::RSKName(settings[i].key)] = values[i];
+    j["settings"] = s;
 
     const std::string text = j.dump(2);
     FILE* f = std::fopen(path.c_str(), "wb");
@@ -105,9 +115,12 @@ static bool SavePreset(const std::string& path, const char playerNames[2][64], s
     return true;
 }
 
-// Restores whichever player names the preset carries. Returns false only on
-// read/parse failure (a preset with no "players" array is still a success).
-static bool LoadPreset(const std::string& path, char playerNames[2][64], std::string& err) {
+// Restores the player names and the curated settings a preset carries. Missing
+// keys keep their defaults; unknown keys are ignored; hidden/fixed settings keep
+// their fixed value regardless of what the file says. Returns false only on
+// read/parse failure. `values` is reset to defaults then overlaid with the file.
+static bool LoadPreset(const std::string& path, char playerNames[2][64],
+                       std::vector<int>& values, std::string& err) {
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) { err = "could not open file"; return false; }
     std::string text;
@@ -129,6 +142,29 @@ static bool LoadPreset(const std::string& path, char playerNames[2][64], std::st
         for (size_t k = 0; k < 2 && k < p.size(); ++k)
             if (p[k].is_string())
                 std::snprintf(playerNames[k], 64, "%s", p[k].get<std::string>().c_str());
+    }
+
+    // Start from defaults so missing keys keep them, then overlay present keys.
+    const auto& settings = ms::CuratedSettings();
+    values.assign(settings.size(), 0);
+    for (size_t i = 0; i < settings.size(); ++i) values[i] = settings[i].defaultValue;
+
+    if (j.contains("settings") && j["settings"].is_object()) {
+        const auto& s = j["settings"];
+        for (size_t i = 0; i < settings.size(); ++i) {
+            const ms::Setting& st = settings[i];
+            if (st.hidden) continue;  // fixed values never come from a preset
+            auto it = s.find(ms::RSKName(st.key));
+            if (it == s.end() || !it->is_number_integer()) continue;
+            int v = it->get<int>();
+            if (st.ui == ms::Ui::Checkbox) {
+                v = (v != 0) ? 1 : 0;
+            } else if (st.ui == ms::Ui::Slider) {
+                const int hi = st.sliderMax - st.sliderMin;
+                v = std::clamp(v, 0, hi);
+            }
+            values[i] = v;
+        }
     }
     return true;
 }
@@ -234,6 +270,75 @@ int main(int, char**) {
     std::string createStatus;
     std::string presetStatus;      // feedback for Save/Load Preset
 
+    // Curated randomizer settings — one value per ms::CuratedSettings() entry,
+    // initialized to defaults. Rendered on the Create screen (5 tabs) and
+    // round-tripped through presets. Values are base SoH option indices.
+    const std::vector<ms::Setting>& curated = ms::CuratedSettings();
+    std::vector<int> settingValues(curated.size());
+    for (size_t i = 0; i < curated.size(); ++i) settingValues[i] = curated[i].defaultValue;
+    // Current value of a setting by key (for grey-out dependencies). Linear scan
+    // over a small table — fine for per-frame use.
+    auto settingValueOf = [&](RandomizerSettingKey k) -> int {
+        for (size_t i = 0; i < curated.size(); ++i)
+            if (curated[i].key == k) return settingValues[i];
+        return 0;
+    };
+    // Renders a single curated setting at table-cell width: checkboxes keep the
+    // inline label; combos/sliders put the label on its own line above a
+    // full-width widget. Honors grey-out rules and shows the verbatim tooltip.
+    auto renderCuratedSetting = [&](size_t i) {
+        const ms::Setting& st = curated[i];
+        const bool disabled =
+            (st.greyWhenKeyOn != RSK_NONE && settingValueOf(st.greyWhenKeyOn) != 0);
+        if (disabled) ImGui::BeginDisabled();
+        ImGui::PushID((int)i);
+        int& val = settingValues[i];
+        bool hovered = false;
+        if (st.ui == ms::Ui::Checkbox) {
+            bool b = (val != 0);
+            if (ImGui::Checkbox(st.label, &b)) val = b ? 1 : 0;
+            hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+        } else if (st.ui == ms::Ui::Combo) {
+            ImGui::TextUnformatted(st.label);
+            hovered |= ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+            const char* preview = "?";
+            for (const ms::Opt& o : st.options)
+                if (o.value == val) { preview = o.label; break; }
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            const bool open = ImGui::BeginCombo("##w", preview);
+            hovered |= ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+            if (open) {
+                for (const ms::Opt& o : st.options) {
+                    const bool sel = (o.value == val);
+                    // Dungeon Rewards: every option but the default is greyed out
+                    // (effectively fixed) for now.
+                    const ImGuiSelectableFlags fl =
+                        (st.greyNonDefaultOptions && o.value != st.defaultValue)
+                            ? ImGuiSelectableFlags_Disabled
+                            : 0;
+                    if (ImGui::Selectable(o.label, sel, fl)) val = o.value;
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+        } else {  // Slider — label above, full-width slider below
+            ImGui::TextUnformatted(st.label);
+            hovered |= ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+            int disp = val + st.sliderMin;  // stored value is the option index
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::SliderInt("##w", &disp, st.sliderMin, st.sliderMax))
+                val = disp - st.sliderMin;
+            hovered |= ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+        }
+        ImGui::PopID();
+        if (disabled) ImGui::EndDisabled();
+        if (hovered && st.tooltip && st.tooltip[0])
+            ImGui::SetTooltip("%s", st.tooltip);
+        // Breathing room between settings (the label stays tight to its own widget,
+        // so each label+control reads as one group with a larger gap to the next).
+        ImGui::Dummy(ImVec2(0.0f, 5.0f));
+    };
+
     // Preset templates discovered in kPresetDir, refreshed on demand.
     std::vector<std::string> presetTemplates = ScanPresetTemplates();
     int presetTemplateIdx = -1;
@@ -337,7 +442,7 @@ int main(int, char**) {
                         if (ImGui::Selectable(label.c_str(), sel)) {
                             presetTemplateIdx = i;
                             std::string err;
-                            if (LoadPreset(presetTemplates[i], playerNames, err))
+                            if (LoadPreset(presetTemplates[i], playerNames, settingValues, err))
                                 presetStatus = "Loaded template " + label;
                             else
                                 presetStatus = "Load failed: " + err;
@@ -359,7 +464,7 @@ int main(int, char**) {
                     std::string path = PickSavePresetFile();
                     if (!path.empty()) {
                         std::string err;
-                        if (SavePreset(path, playerNames, err)) {
+                        if (SavePreset(path, playerNames, settingValues, err)) {
                             presetStatus = "Saved preset -> " + path;
                             presetTemplates = ScanPresetTemplates();
                         } else {
@@ -372,7 +477,7 @@ int main(int, char**) {
                     std::string path = PickOpenPresetFile();
                     if (!path.empty()) {
                         std::string err;
-                        if (LoadPreset(path, playerNames, err))
+                        if (LoadPreset(path, playerNames, settingValues, err))
                             presetStatus = "Loaded preset from " + path;
                         else
                             presetStatus = "Load failed: " + err;
@@ -389,6 +494,51 @@ int main(int, char**) {
             ImGui::InputText("Player 1", playerNames[0], sizeof(playerNames[0]));
             ImGui::SetNextItemWidth(260.0f);
             ImGui::InputText("Player 2", playerNames[1], sizeof(playerNames[1]));
+
+            // --- Randomizer settings (curated) -------------------------------------
+            // Five tabs of curated SoH settings rendered from the ms::CuratedSettings()
+            // table. Whole sections are distributed across two columns (1st section in
+            // the left column, 2nd in the right, 3rd in the left, ...); each section's
+            // settings stack vertically inside its column. Hidden/fixed entries are
+            // skipped. A scroll child keeps the action buttons visible.
+            ImGui::Spacing();
+            ImGui::SeparatorText("Randomizer Settings");
+            ImGui::BeginChild("settings", ImVec2(0, -96.0f), ImGuiChildFlags_Borders);
+            if (ImGui::BeginTabBar("settingsTabs")) {
+                for (const char* tab : ms::Tabs()) {
+                    if (!ImGui::BeginTabItem(tab)) continue;
+                    // Gather this tab's visible sections (in table order), each with
+                    // its setting indices.
+                    std::vector<const char*> secName;
+                    std::vector<std::vector<size_t>> secItems;
+                    for (size_t i = 0; i < curated.size(); ++i) {
+                        const ms::Setting& st = curated[i];
+                        if (st.hidden || std::strcmp(st.tab, tab) != 0) continue;
+                        if (secName.empty() || std::strcmp(secName.back(), st.section) != 0) {
+                            secName.push_back(st.section);
+                            secItems.emplace_back();
+                        }
+                        secItems.back().push_back(i);
+                    }
+                    // Two-column grid of whole sections; roomy padding spaces the
+                    // columns apart. Left column = sections 0,2,4...; right = 1,3,5...
+                    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(16.0f, 6.0f));
+                    if (ImGui::BeginTable("sectionGrid", 2, ImGuiTableFlags_SizingStretchSame)) {
+                        for (int col = 0; col < 2; ++col) {
+                            ImGui::TableNextColumn();
+                            for (size_t s = (size_t)col; s < secName.size(); s += 2) {
+                                ImGui::SeparatorText(secName[s]);
+                                for (size_t idx : secItems[s]) renderCuratedSetting(idx);
+                            }
+                        }
+                        ImGui::EndTable();
+                    }
+                    ImGui::PopStyleVar();
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
+            }
+            ImGui::EndChild();
 
             ImGui::Spacing();
             ImGui::Separator();

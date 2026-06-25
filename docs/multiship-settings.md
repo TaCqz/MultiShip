@@ -793,5 +793,5 @@ All checkboxes (`Off`/`On`), base default **Off**, no base-game tooltip.
   tooltip line reads `Stone`. Options use the UI labels from `settings.cpp`; tooltip reproduced as-is.
 - **`RSK_STARTING_HEARTS` default:** the macro stores option index `2` over the `NumOpts(1, 20)`
   label list (`"1".."20"`), i.e. label `"3"` → **3 starting hearts** (OoT vanilla).
-- **Open Forest naming:** base SoH internal name is *Closed Forest* with labels `On/Deku Only/Off`;
-  MultiShip presents them as *Closed/Deku Only/Open* (`On` = closed, `Off` = open).
+- **Closed Forest naming:** documented under SoH's native name *Closed Forest* with labels
+  `On/Deku Only/Off` (base default `On`); no MultiShip relabeling.

@@ -149,7 +149,8 @@ int main(int argc, char** argv) {
         std::string who;
         for (size_t i = 0; i < loadedSeed.players.size(); ++i)
             who += (i ? ", " : "") + loadedSeed.players[i];
-        spdlog::info("[SERVER] Loaded seed {} ({} worlds: {}), {} placements.", loadedSeed.seed,
+        spdlog::info("[SERVER] Loaded seed {} (#{}) ({} worlds: {}), {} placements.",
+                     loadedSeed.seedId.empty() ? "(legacy)" : loadedSeed.seedId, loadedSeed.seed,
                      loadedSeed.numWorlds, who, loadedSeed.placements.size());
     }
 

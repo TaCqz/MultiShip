@@ -2,9 +2,12 @@
 // or START the server with an existing .multiship seed, then run the server that the
 // ShipwreckCombo MultiShip module connects to.
 //
-// Reset baseline: the randomization engine is gone. "Create a new seed" writes an
-// empty .multiship (header + seed + player names, zero placements/settings); the
-// Create screen offers only player names + presets. The server is a relay; under
+// "Create a new seed" runs the restored multiworld engine (FOUNDATION pipeline):
+// it produces a jointly-beatable 2-world placement, seasons junk with ice traps,
+// derives a human-readable seed id, and writes a versioned .multiship carrying the
+// curated settings + placements + owners + names. Placement uses the engine's baked
+// defaults for now; the curated UI settings flow to the OUTPUT but don't branch
+// placement yet (wired per-setting in later tickets). The server is a relay; under
 // MULTISHIP_DEBUG it also exposes a manual give-item picker and a region teleport.
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
@@ -18,17 +21,21 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cfloat>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "Server.h"
 #include "CuratedSettings.h"
 #include "rando/SeedFile.h"
+#include "rando/Generator.h"
 #include "rando/ItemNames.h"
 
 #ifdef _WIN32
@@ -345,9 +352,30 @@ int main(int, char**) {
 
     bool seedReady = false;        // a seed has been created or loaded
     uint64_t activeSeed = 0;
+    std::string activeSeedId;      // human-readable seed id (from the loaded/created file)
     std::vector<std::string> activePlayers;
     int activePlacements = 0;
     std::string activeSource;      // where it came from (created file / loaded path)
+
+    // --- async seed generation ---------------------------------------------------
+    // Generation runs the multiworld fill, which takes a noticeable moment. Doing it
+    // on the ImGui thread would freeze the window (looks like a crash), so it runs on
+    // a worker thread that publishes progress for the main loop to draw each frame.
+    std::thread genThread;
+    std::atomic<bool> genActive{false};   // a worker is running
+    std::atomic<bool> genDone{false};     // worker finished; main thread harvests result
+    std::atomic<float> genProgress{0.0f}; // [0,1]
+    std::mutex genStageMtx;
+    std::string genStage;                 // current stage label (guarded by genStageMtx)
+    // Result handed back by the worker; only read after genDone is observed true.
+    bool genOk = false;
+    std::string genStatus;
+    std::string genBase;                  // file base path (no extension)
+    SeedFile::Loaded genLoaded;
+    auto setStage = [&](const char* s) {
+        std::lock_guard<std::mutex> lk(genStageMtx);
+        genStage = s ? s : "";
+    };
 
     // --- server-view state ---
     int port = 43384;
@@ -405,6 +433,7 @@ int main(int, char**) {
                     if (SeedFile::ReadMultiship(path, ld, err)) {
                         seedReady = true;
                         activeSeed = ld.seed;
+                        activeSeedId = ld.seedId;
                         activePlayers = ld.players;
                         activePlacements = (int)ld.placements.size();
                         activeSource = path;
@@ -542,67 +571,121 @@ int main(int, char**) {
 
             ImGui::Spacing();
             ImGui::Separator();
-            if (ImGui::Button("Create Seed", ImVec2(160, 32))) {
-                createStatus.clear();
-                seedReady = false;
-                std::random_device rd;
-                uint64_t seed = ((uint64_t)rd() << 32) ^ rd();
-                std::vector<std::string> players = { playerNames[0], playerNames[1] };
-                // Build the file name as "<player1>_<player2>_<seed>" inside a "seeds/"
-                // subfolder. Player names are sanitized to safe filename characters
-                // (alphanumerics, '-', '.'); anything else is dropped, and an empty name
-                // falls back to "Player".
-                auto sanitize = [](const std::string& s) {
-                    std::string out;
-                    for (char c : s) {
-                        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                            c == '-' || c == '.') {
-                            out += c;
-                        }
-                    }
-                    return out.empty() ? std::string("Player") : out;
-                };
-                std::string namePart = sanitize(playerNames[0]) + "_" + sanitize(playerNames[1]);
-                std::error_code mkdirEc;
-                std::filesystem::create_directories("seeds", mkdirEc);
-                std::string base =
-                    (std::filesystem::path("seeds") / (namePart + "_" + std::to_string(seed))).string();
-                std::string err;
-                bool okBin = SeedFile::WriteMultiship(base + ".multiship", seed, players, err);
-                bool okTxt = SeedFile::WriteSpoiler(base + "_spoiler.txt", seed, players, err);
-                if (okBin && okTxt) {
-                    // Read the file back so the Server view reflects exactly what was written.
-                    SeedFile::Loaded ld;
-                    std::string lerr;
-                    if (SeedFile::ReadMultiship(base + ".multiship", ld, lerr)) {
-                        seedReady = true;
-                        activeSeed = ld.seed;
-                        activePlayers = ld.players;
-                        activePlacements = (int)ld.placements.size();
-                        activeSource = base + ".multiship";
-                        createStatus = "Created seed " + base + "  ->  " + base +
-                                       ".multiship  +  _spoiler.txt";
-                    } else {
-                        createStatus = "Created files but failed to read back: " + lerr;
-                    }
-                } else {
-                    createStatus = "Write failed: " + err;
+            // Harvest a finished background generation: the worker published its result,
+            // so move it into the active-seed state and join the thread.
+            if (genActive.load() && genDone.load()) {
+                if (genThread.joinable()) genThread.join();
+                genActive.store(false);
+                createStatus = genStatus;
+                if (genOk) {
+                    seedReady = true;
+                    activeSeed = genLoaded.seed;
+                    activeSeedId = genLoaded.seedId;
+                    activePlayers = genLoaded.players;
+                    activePlacements = (int)genLoaded.placements.size();
+                    activeSource = genBase + ".multiship";
                 }
             }
-            ImGui::SameLine();
-            ImGui::BeginDisabled(!seedReady);
-            if (ImGui::Button("Continue to server", ImVec2(180, 32))) {
-                screen = Screen::ServerView;
-            }
-            ImGui::EndDisabled();
-            ImGui::SameLine();
-            if (ImGui::Button("Back", ImVec2(80, 32))) screen = Screen::Menu;
 
-            if (!createStatus.empty()) {
-                ImGui::Spacing();
-                ImGui::TextWrapped("%s", createStatus.c_str());
-                if (seedReady) {
-                    if (ImGui::Button("Open file location")) OpenFileLocation(activeSource);
+            if (genActive.load()) {
+                // Generation in flight: draw progress instead of the action buttons so the
+                // window stays responsive and the user can see it isn't hung.
+                float frac = genProgress.load();
+                std::string stage;
+                { std::lock_guard<std::mutex> lk(genStageMtx); stage = genStage; }
+                ImGui::ProgressBar(frac, ImVec2(-FLT_MIN, 0.0f), stage.c_str());
+                ImGui::TextDisabled("Generating seed… this can take a moment.");
+            } else {
+                if (ImGui::Button("Create Seed", ImVec2(160, 32))) {
+                    createStatus.clear();
+                    seedReady = false;
+                    std::random_device rd;
+                    uint64_t seed = ((uint64_t)rd() << 32) ^ rd();
+
+                    // Gather the curated UI selections into the contract's setting form
+                    // (RSK key -> base option index), verbatim — including hidden/fixed
+                    // entries so the file fully documents the intended settings.
+                    Generator::Options opts;
+                    opts.seed = seed;
+                    opts.players = { playerNames[0], playerNames[1] };
+                    opts.settings.reserve(curated.size());
+                    for (size_t i = 0; i < curated.size(); ++i)
+                        opts.settings.push_back({ (uint16_t)curated[i].key, (uint16_t)settingValues[i] });
+
+                    // Build the file name "<player1>_<player2>_<seed>" inside "seeds/".
+                    // Names are sanitized to safe filename chars; an empty name -> "Player".
+                    auto sanitize = [](const std::string& s) {
+                        std::string out;
+                        for (char c : s) {
+                            if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+                                (c >= 'a' && c <= 'z') || c == '-' || c == '.') {
+                                out += c;
+                            }
+                        }
+                        return out.empty() ? std::string("Player") : out;
+                    };
+                    std::string namePart = sanitize(playerNames[0]) + "_" + sanitize(playerNames[1]);
+                    std::error_code mkdirEc;
+                    std::filesystem::create_directories("seeds", mkdirEc);
+                    genBase = (std::filesystem::path("seeds") /
+                               (namePart + "_" + std::to_string(seed))).string();
+
+                    // Run the FOUNDATION pipeline on a worker thread. It only writes the
+                    // shared gen* fields (never ImGui), so the main loop keeps drawing the
+                    // progress bar; the harvest block above picks up the result.
+                    genProgress.store(0.0f);
+                    setStage("Starting…");
+                    genOk = false;
+                    genStatus.clear();
+                    genDone.store(false);
+                    genActive.store(true);
+                    const std::string base = genBase;
+                    genThread = std::thread([&, opts, base]() {
+                        Generator::Output g = Generator::Generate(
+                            opts, [&](float f, const char* stage) {
+                                genProgress.store(f);
+                                setStage(stage);
+                            });
+
+                        setStage("Writing seed file…");
+                        genProgress.store(0.995f);
+                        std::string err;
+                        bool okBin = SeedFile::WriteMultiship(base + ".multiship", g.seed, err);
+                        bool okTxt = SeedFile::WriteSpoiler(base + "_spoiler.txt", g.seed, err);
+                        if (okBin && okTxt) {
+                            SeedFile::Loaded ld;
+                            std::string lerr;
+                            if (SeedFile::ReadMultiship(base + ".multiship", ld, lerr)) {
+                                genLoaded = ld;
+                                genOk = true;
+                                genStatus = "Created seed " + ld.seedId +
+                                            (g.beatable ? "  (beatable)" : "  (WARNING: not beatable!)") +
+                                            "  ->  " + base + ".multiship  +  _spoiler.txt";
+                            } else {
+                                genStatus = "Created files but failed to read back: " + lerr;
+                            }
+                        } else {
+                            genStatus = "Write failed: " + err;
+                        }
+                        genProgress.store(1.0f);
+                        genDone.store(true);  // release: makes the writes above visible to main
+                    });
+                }
+                ImGui::SameLine();
+                ImGui::BeginDisabled(!seedReady);
+                if (ImGui::Button("Continue to server", ImVec2(180, 32))) {
+                    screen = Screen::ServerView;
+                }
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                if (ImGui::Button("Back", ImVec2(80, 32))) screen = Screen::Menu;
+
+                if (!createStatus.empty()) {
+                    ImGui::Spacing();
+                    ImGui::TextWrapped("%s", createStatus.c_str());
+                    if (seedReady) {
+                        if (ImGui::Button("Open file location")) OpenFileLocation(activeSource);
+                    }
                 }
             }
         }
@@ -612,7 +695,10 @@ int main(int, char**) {
             ImGui::TextUnformatted("MultiShip Server");
             ImGui::Separator();
             if (seedReady) {
-                ImGui::Text("Seed %llu", (unsigned long long)activeSeed);
+                if (!activeSeedId.empty())
+                    ImGui::Text("Seed %s  (#%llu)", activeSeedId.c_str(), (unsigned long long)activeSeed);
+                else
+                    ImGui::Text("Seed %llu", (unsigned long long)activeSeed);
                 std::string who;
                 for (size_t i = 0; i < activePlayers.size(); ++i)
                     who += (i ? ", " : "") + activePlayers[i];
@@ -726,6 +812,9 @@ int main(int, char**) {
         SDL_RenderPresent(renderer);
     }
 
+    // Let any in-flight seed generation finish so the worker thread isn't torn down
+    // mid-run (it touches only local state, so the brief wait is safe and bounded).
+    if (genThread.joinable()) genThread.join();
     server.Stop();
     ImGui_ImplSDLRenderer2_Shutdown();
     ImGui_ImplSDL2_Shutdown();

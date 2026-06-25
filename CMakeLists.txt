@@ -75,12 +75,32 @@ elseif(TARGET SDL2::SDL2)
 endif()
 
 # ------------------------------------------------------------------------------
-# Seed IO library (reset baseline). The randomization engine was removed; this is
-# now just the .multiship/spoiler reader/writer plus the kept RG_ item catalog.
-# No SDL/ImGui dependency, so it builds standalone.
+# Rando engine — restored clean-room port of the Ship of Harkinian randomizer
+# logic + multiworld assumed-fill, the FOUNDATION Generator pipeline, and the
+# .multiship/spoiler IO. No SDL/ImGui dependency, so it builds standalone and the
+# smoke test links only this.
 # ------------------------------------------------------------------------------
-add_library(multiship_rando STATIC src/rando/SeedFile.cpp)
+file(GLOB MULTISHIP_RANDO_SOURCES CONFIGURE_DEPENDS
+    src/rando/Logic.cpp
+    src/rando/LogicState.cpp
+    src/rando/RegionGraph.cpp
+    src/rando/Search.cpp
+    src/rando/Fill.cpp
+    src/rando/Generator.cpp
+    src/rando/SeedFile.cpp
+    src/rando/location_access/*.cpp
+    src/rando/location_access/*/*.cpp
+)
+add_library(multiship_rando STATIC ${MULTISHIP_RANDO_SOURCES})
 target_include_directories(multiship_rando PUBLIC src)
+
+# Foundation smoke test: a generated 2-world seed is jointly beatable AND the
+# serialized contract round-trips (settings + placements + owners + names + seed id).
+# Links only the engine (no SDL/ImGui), so it runs anywhere the library builds.
+enable_testing()
+add_executable(MultiShipSmoke src/rando/_test/smoke_foundation.cpp)
+target_link_libraries(MultiShipSmoke PRIVATE multiship_rando)
+add_test(NAME foundation_smoke COMMAND MultiShipSmoke)
 
 # ------------------------------------------------------------------------------
 # Desktop GUI server (optional) — Dear ImGui (pinned) + SDL2 / SDL_Renderer

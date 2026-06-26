@@ -6,6 +6,8 @@
 
 #include <cstring>
 
+#include "rando/ItemNames.h"  // ItemCatalog: RandomizerGet -> "RG_<token>" (F-040 Part B routing)
+
 namespace {
 // Per-connection state: the socket plus a buffer that accumulates bytes until a
 // full '\0'-delimited packet is available.
@@ -54,6 +56,18 @@ std::string Base64Encode(const std::string& in) {
         out.push_back('=');
     }
     return out;
+}
+
+// RandomizerGet -> its "RG_<TOKEN>" name for the give_item command (the client resolves
+// the token via StringToEnum). Linear scan of the catalog — routed deliveries are
+// infrequent, so a per-call scan is fine and avoids a static map.
+std::string ItemToken(RandomizerGet rg) {
+    for (const auto& it : ItemCatalog::Items()) {
+        if (it.rg == rg) {
+            return it.name;
+        }
+    }
+    return "RG_NONE";
 }
 
 // Keep player names to a single short, printable line so a client cannot inject
@@ -316,8 +330,26 @@ void Server::Run(uint16_t port) {
                         }
                     }
 
-                    // Reset baseline: the multiworld routing engine is gone, so
-                    // incoming hook packets are simply logged (below), not routed.
+                    // F-040 Part B: route cross-world collections + crash-safe catch-up.
+                    // A 'hook' packet carries {hook:{type, ...}}. We act on two of them:
+                    //  - OnCheckCollected{check, world}: the client collected a check in its
+                    //    world whose item belongs to ANOTHER world; resolve the owner and
+                    //    queue/push the item to that player.
+                    //  - OnLoadGame{receivedSeq}: the client (re)loaded its save and reported
+                    //    the highest delivery it has applied; replay anything queued past it so
+                    //    it catches up (this is what delivers items collected while it was on a
+                    //    different save / offline). Other hooks (OnConnected, ...) just get logged.
+                    if (json.value("type", std::string()) == "hook" && json.contains("hook") &&
+                        json["hook"].is_object()) {
+                        const auto& hook = json["hook"];
+                        const std::string hookType = hook.value("type", std::string());
+                        if (hookType == "OnCheckCollected") {
+                            HandleCheckCollected(hook.value("check", -1), hook.value("world", -1));
+                        } else if (hookType == "OnLoadGame" && !conn.userName.empty()) {
+                            HandleLoadGameCatchup(conn.userName, hook.value("receivedSeq", 0u));
+                        }
+                    }
+
                     summary = json.dump();
                 } catch (const std::exception&) {
                     summary = "(non-JSON) " + packet;
@@ -393,8 +425,12 @@ void Server::SetSeed(const SeedFile::SeedData& seed) {
         mSeedId = seed.seedId;
         mSeedPlayers = seed.players;
         mSeedWireV3 = std::move(wire);
+        mSeedPlacements = seed.placements;  // F-040 Part B: keep the structured table for routing
         mHasSeed = true;
         mWorldLocks.clear();  // a new seed starts a fresh session: drop any prior locks
+        // Fresh per-recipient delivery queues + dedup set for this seed/session.
+        mDeliveries.assign(mSeedPlayers.size(), {});
+        mRoutedChecks.clear();
     }
     // Push the (new) world-name list to any clients already connected when the seed
     // was loaded — the accept path only covers clients that connect afterwards.
@@ -410,6 +446,9 @@ void Server::ClearSeed() {
     mSeedId.clear();
     mSeedPlayers.clear();
     mSeedWireV3.clear();
+    mSeedPlacements.clear();
+    mDeliveries.clear();
+    mRoutedChecks.clear();
     mWorldLocks.clear();
 }
 
@@ -456,5 +495,111 @@ void Server::ReleaseLocksFor(uint64_t connId) {
         } else {
             ++it;
         }
+    }
+}
+
+void Server::HandleCheckCollected(int check, int collectorWorld) {
+    if (check < 0 || collectorWorld < 0) {
+        return;
+    }
+    std::string ownerName;    // recipient player; left "" when there's nothing to deliver
+    std::string givePayload;  // the give_item command JSON to unicast
+    std::string logLine;
+    {
+        std::lock_guard<std::mutex> lock(mSeedMutex);
+        if (!mHasSeed) {
+            return;
+        }
+        const auto key = std::make_pair(collectorWorld, check);
+        if (mRoutedChecks.count(key) != 0) {
+            // A replayed/duplicate report (e.g. the client re-reported on reconnect). The item
+            // was already queued for its owner — do not route it again.
+            logLine = "[SERVER] Duplicate collection ignored: check " + std::to_string(check) +
+                      " (world " + std::to_string(collectorWorld + 1) + ")";
+        } else {
+            const SeedFile::Placement* pl = nullptr;
+            for (const auto& p : mSeedPlacements) {
+                if (p.locWorld == collectorWorld && static_cast<int>(p.loc) == check) {
+                    pl = &p;
+                    break;
+                }
+            }
+            if (pl == nullptr) {
+                logLine = "[SERVER] Collection report for unknown placement: check " +
+                          std::to_string(check) + " (world " + std::to_string(collectorWorld + 1) + ")";
+            } else if (pl->ownerWorld < 0 || pl->ownerWorld >= static_cast<int>(mDeliveries.size())) {
+                logLine = "[SERVER] Collection report with out-of-range owner world " +
+                          std::to_string(pl->ownerWorld);
+            } else {
+                const int ownerWorld = pl->ownerWorld;
+                const uint32_t seq = static_cast<uint32_t>(mDeliveries[ownerWorld].size());
+                const std::string token = ItemToken(pl->item);
+                mDeliveries[ownerWorld].push_back(
+                    PendingDelivery{ seq, static_cast<int>(pl->item), check, collectorWorld });
+                mRoutedChecks.insert(key);
+                ownerName = mSeedPlayers[ownerWorld];
+
+                nlohmann::json give;
+                give["type"] = "command";
+                give["command"] = "give_item randomizer " + token;
+                give["multiship"] = true;
+                give["seq"] = seq;
+                givePayload = give.dump();
+
+                logLine = "[SERVER] Routed check " + std::to_string(check) + " (world " +
+                          std::to_string(collectorWorld + 1) + ") -> " + token + " to '" + ownerName +
+                          "' (world " + std::to_string(ownerWorld + 1) + ", seq " + std::to_string(seq) + ")";
+            }
+        }
+    }
+    if (!logLine.empty()) {
+        Log(logLine);
+    }
+    if (!ownerName.empty() && !givePayload.empty()) {
+        // Queue the give. If the owner isn't currently connected, the unicast just logs
+        // "target not found" and the item stays queued for the owner's OnLoadGame catch-up.
+        UnicastToClient(ownerName, givePayload);
+    }
+}
+
+void Server::HandleLoadGameCatchup(const std::string& userName, uint32_t receivedSeq) {
+    std::vector<std::string> payloads;
+    std::string logLine;
+    {
+        std::lock_guard<std::mutex> lock(mSeedMutex);
+        if (!mHasSeed) {
+            return;
+        }
+        int world = -1;
+        for (size_t i = 0; i < mSeedPlayers.size(); ++i) {
+            if (mSeedPlayers[i] == userName) {
+                world = static_cast<int>(i);
+                break;
+            }
+        }
+        if (world < 0 || world >= static_cast<int>(mDeliveries.size())) {
+            return;  // this client's name isn't one of the loaded seed's worlds
+        }
+        for (const auto& d : mDeliveries[world]) {
+            if (d.seq < receivedSeq) {
+                continue;  // already applied by the client (its persisted high-water mark)
+            }
+            nlohmann::json give;
+            give["type"] = "command";
+            give["command"] = "give_item randomizer " + ItemToken(static_cast<RandomizerGet>(d.item));
+            give["multiship"] = true;
+            give["seq"] = d.seq;
+            payloads.push_back(give.dump());
+        }
+        if (!payloads.empty()) {
+            logLine = "[SERVER] Catch-up: re-sending " + std::to_string(payloads.size()) +
+                      " queued item(s) to '" + userName + "' (from seq " + std::to_string(receivedSeq) + ")";
+        }
+    }
+    if (!logLine.empty()) {
+        Log(logLine);
+    }
+    for (const std::string& p : payloads) {
+        UnicastToClient(userName, p);
     }
 }

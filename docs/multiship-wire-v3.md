@@ -84,6 +84,66 @@ On a granted request the server **locks** that player's world to the requesting 
 A request from the connection that **already holds** the lock is granted again (idempotent
 re-send), not denied.
 
+### 4. Client → Server: check collected (F-040, live cross-world item flow)
+
+Emitted by the SoH client when the player collects a check **in their own world whose item
+belongs to a DIFFERENT world**. The server is expected to route that item to its owner's
+player. (Items the player collects that are their OWN are granted locally by the client and
+are **not** reported.) The client sends this exactly once per check — it tracks collected
+checks in its save, so reloads and reconnects never re-report.
+
+```json
+{
+  "type": "hook",
+  "hook": { "type": "OnCheckCollected", "check": 123, "world": 0 },
+  "id": 2752345123,
+  "userName": "Player 1"
+}
+```
+
+- `check` — the `RandomizerCheck` enum value of the collected location (in the sender's world).
+- `world` — the sender's **0-based world index** (the world the location is in).
+- `userName` — auto-stamped on every client packet (the sending player's name).
+- `id` — a random u32 the client tags every packet with; echoed in result packets.
+
+**Server handling (F-040 Part B, implemented):** on receipt the server looks up the placement at
+`(locWorld == world, loc == check)` in the loaded seed, finds its `ownerWorld` + item, appends the
+item to that owner's per-recipient **delivery queue** (assigning the next monotonic `seq`), and — if
+the owner is connected — pushes it immediately (msg 5). It is **deduped by `(world, check)`**, so a
+replayed report (e.g. on reconnect) never double-routes. State is in-memory per session; durable
+persistence/reconcile is the later F-039.
+
+### 5. Server → Client: routed item delivery (F-040 Part B)
+
+The server delivers a routed (or queued) item to its owner by reusing the **F-030 tracked give**
+shape — the client already drains these through its crash-safe delivery queue and persists the
+applied high-water mark (`multishipReceivedSeq`).
+
+```json
+{ "type": "command", "command": "give_item randomizer RG_KOKIRI_SWORD", "multiship": true, "seq": 0 }
+```
+
+- `command` — `give_item randomizer RG_<TOKEN>` (the client resolves the `RG_` token via `StringToEnum`).
+- `multiship: true` + `seq` (unsigned) — marks it as a **tracked** stream delivery: the client dedups
+  against its persisted `multishipReceivedSeq` and advances it on grant. `seq` is **per recipient
+  world**, dense from 0, matching that save's single high-water mark.
+- A give **without** `multiship`/`seq` is an untracked manual send (the debug "Send Item" tool) — same
+  command shape, but it never touches the seq stream.
+
+### 6. Catch-up via the OnLoadGame handshake (F-040 Part B)
+
+The client already reports, on every load, the highest tracked delivery it has applied:
+
+```json
+{ "type": "hook", "hook": { "type": "OnLoadGame", "fileNum": 0, "questId": 4, "receivedSeq": 3 }, "userName": "Player 2" }
+```
+
+On this, the server resolves the connection's world (by `userName`) and **replays every queued
+delivery for that world with `seq >= receivedSeq`** as msg 5 unicasts. This is what delivers items
+that were routed to a player while it was offline / playing a different save: collect a foreign item
+on world A → it's queued for world B → load world B's save → the handshake fires → the queued items
+arrive. A fresh save reports `receivedSeq: 0`, so it receives the full backlog.
+
 ## World lock semantics (in-memory; durable persistence is F-039)
 
 - "Lock in" = assign the player's world index by name and reserve it so **no other client**

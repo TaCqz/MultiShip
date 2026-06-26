@@ -102,6 +102,31 @@ Output Generate(const Options& opts, const ProgressFn& progress) {
     for (int i = 0; i < n; ++i) sd.placements[junkSlots[i]].item = RG_ICE_TRAP;
     out.iceTraps = n;
 
+    // 4. Link's Pocket starting dungeon reward (F-041). The curated config fixes Link's Pocket to
+    //    a dungeon reward with "Any Reward" and Dungeon Rewards to End-of-Dungeons, so every world
+    //    starts with exactly ONE medallion or spiritual stone. The restored engine at baked
+    //    defaults does NOT emit a Link's Pocket placement (verified against the spoiler), so add it
+    //    here, deterministically per (seed, world). It is a normal SAME-WORLD placement at
+    //    RC_LINKS_POCKET (ownerWorld == locWorld) — so NO v3 schema change is needed — that the
+    //    client grants once at save init (not via the cross-world collect flow). Appended AFTER the
+    //    ice-trap step so the junk-slot selection above is byte-for-byte unchanged (rewards are
+    //    advancement, never junk, so they could never be ice-trapped anyway). End-of-Dungeons is
+    //    assumed for now; the conditional on the Dungeon Rewards setting arrives in the per-setting
+    //    phase.
+    {
+        // The nine dungeon rewards are contiguous in RandomizerGet: the three spiritual stones
+        // (Kokiri's Emerald .. Zora's Sapphire) then the six medallions (.. Light Medallion).
+        const int rewardBase = (int)RG_KOKIRI_EMERALD;
+        const int rewardCount = (int)RG_LIGHT_MEDALLION - rewardBase + 1;  // 9
+        for (int w = 0; w < numWorlds; ++w) {
+            // Distinct salt per world, mixed from the seed -> deterministic + stable across runs.
+            uint64_t h = Mix(opts.seed ^ (0x10CCE7B19E3779F9ULL + (uint64_t)w * 0x9E3779B97F4A7C15ULL));
+            RandomizerGet reward = (RandomizerGet)(rewardBase + (int)(h % (uint64_t)rewardCount));
+            // { loc, locWorld, item, ownerWorld } — owned + granted locally by world w's player.
+            sd.placements.push_back({ RC_LINKS_POCKET, w, reward, w });
+        }
+    }
+
     return out;
 }
 

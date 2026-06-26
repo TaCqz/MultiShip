@@ -18,10 +18,23 @@ time.
    (never progression, never an existing ice trap), so beatability is preserved.
    Selection is deterministic (seed-derived RNG over the junk slots in placement order).
    The ice-trap **setting** is wired in a later ticket; this is a fixed sane default.
-3. **Seed id** — `Generator::MakeSeedId(seed)` derives a human-readable id from the
+3. **Link's Pocket starting reward** (F-041) — one dungeon reward (medallion or
+   spiritual stone) is appended per world as a `RC_LINKS_POCKET` placement, owned by
+   that world (`ownerWorld == locWorld`), so each player starts with exactly one reward.
+   The reward is chosen deterministically per `(seed, world)` from the nine contiguous
+   dungeon-reward `RandomizerGet`s (`RG_KOKIRI_EMERALD .. RG_LIGHT_MEDALLION`). The
+   restored engine at baked defaults does **not** emit a Link's Pocket placement, so the
+   Generator adds it. It is appended **after** the ice-trap step, so the junk-slot
+   selection is unaffected (rewards are advancement, never junk). The curated config
+   fixes Link's Pocket = "Any Reward" and Dungeon Rewards = End-of-Dungeons; that
+   End-of-Dungeons assumption is hardcoded here for now and becomes conditional in the
+   per-setting phase. The SoH client consumes this placement: it grants the reward once
+   at save init (not via the cross-world collect flow) and shows it on the file-select
+   screen before loading. No v3 schema change — it rides the existing placement table.
+4. **Seed id** — `Generator::MakeSeedId(seed)` derives a human-readable id from the
    numeric seed, e.g. `heron-snow-oak-d0fa` (word triplet from a 64-word list +
    4 hex digits). Deterministic, so both players can confirm they got the same seed.
-4. **Output** — assembles a `SeedFile::SeedData` carrying the seed id, player names,
+5. **Output** — assembles a `SeedFile::SeedData` carrying the seed id, player names,
    the full placement table (with owners), and the curated settings verbatim.
 
 ## Baseline configuration (placement)
@@ -97,3 +110,8 @@ selection, and the seed id are all pure functions of `seed`.
 `MultiShipSmoke` (CMake target; `ctest -R foundation_smoke`) asserts: a generated
 2-world seed is jointly beatable, generation is deterministic, ice traps are injected,
 and the serialized form round-trips settings + placements + owners + names + seed id.
+
+`MultiShipLinksPocketSmoke` (CMake target; `ctest -R links_pocket_smoke`) asserts the
+F-041 starting reward: exactly one `RC_LINKS_POCKET` placement per world, each a
+same-world dungeon reward (`ownerWorld == locWorld`, item in the reward range), and
+deterministic across runs.

@@ -102,6 +102,12 @@ add_executable(MultiShipSmoke src/rando/_test/smoke_foundation.cpp)
 target_link_libraries(MultiShipSmoke PRIVATE multiship_rando)
 add_test(NAME foundation_smoke COMMAND MultiShipSmoke)
 
+# F-041 smoke test: the generator emits exactly one Link's Pocket dungeon-reward placement
+# per world (same-world, owned locally), deterministically per seed.
+add_executable(MultiShipLinksPocketSmoke src/rando/_test/smoke_linkspocket.cpp)
+target_link_libraries(MultiShipLinksPocketSmoke PRIVATE multiship_rando)
+add_test(NAME links_pocket_smoke COMMAND MultiShipLinksPocketSmoke)
+
 # ------------------------------------------------------------------------------
 # Desktop GUI server (optional) — Dear ImGui (pinned) + SDL2 / SDL_Renderer
 # backends, built as a static lib. Skipped entirely when MULTISHIP_BUILD_GUI=OFF,

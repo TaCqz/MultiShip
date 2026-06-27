@@ -70,6 +70,12 @@ foundation. Per-setting tickets close the gap one setting at a time, verifying b
 seed and the client view each time. The shown items and player-ownership **labels** are
 already correct, because they come from the placement table + owners, which are accurate.
 
+Which settings actually branch placement is governed by the central **honored-settings
+allowlist** (`Generator::HonoredSettings`), with the engine reset to baked defaults before
+every generation so nothing leaks between seeds. Both are documented in
+`docs/multiship-honored-settings.md` — that is the precondition (F-042) and the workflow
+the per-setting tickets follow to move a setting onto the allowlist.
+
 ## Serialized contract (`.multiship`, schema v3)
 
 `SeedFile::SeedData` is the stable, versioned contract — persisted to the `.multiship`

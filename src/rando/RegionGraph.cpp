@@ -266,6 +266,11 @@ std::shared_ptr<Rando::Logic> NewWorldLogic() {
 void RegionTable_Init() {
     if (!gCtx) gCtx = std::make_shared<Rando::Context>();
     if (!gLogic0) gLogic0 = std::make_shared<Rando::Logic>();
+    // F-042 gCtx reset: the settings Context is a singleton that persists across
+    // Fill::Generate calls in one process. Re-baseline it every init so option overrides
+    // + the normalizations Fill applies to one seed can't leak into the next. (On the very
+    // first call this just re-applies the defaults the constructor already set — a no-op.)
+    gCtx->ResetToDefaults();
     ctx = gCtx.get();
     logic = gLogic0;
     logic->SetContext(gCtx);

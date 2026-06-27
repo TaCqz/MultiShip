@@ -243,6 +243,42 @@ Result Generate(uint64_t seed, int numWorlds, const std::vector<SettingOverride>
         if (selected == RO_AGE_ADULT)
             ctx->SetOption(RSK_DOOR_OF_TIME, RO_DOOROFTIME_OPEN);
     }
+
+    // Ganon's Trials (F-043b). The world logic gates Ganon's Tower on every NON-skipped trial
+    // being cleared (ganons_castle.cpp's RR_GANONS_TOWER_ENTRYWAY), but trials default to
+    // all-skipped (Context::ResetToDefaults), so without this nothing requires them. Resolve the
+    // required COUNT from the setting and mark that many trials required so placement assumes the
+    // real gate (Light Arrows reachable, etc.). Skip -> 0; Set Number -> RSK_TRIAL_COUNT; Random
+    // Number -> a deterministic per-seed count. Which SPECIFIC trials are required does not change
+    // reachability (Medallion-locked trials is off), but we choose a deterministic seed-shuffled
+    // subset so the seed is reproducible, and we collapse the setting to a concrete (Set Number,
+    // resolved count) which the write-back ships — the client mirrors the same count.
+    {
+        uint8_t trialMode = ctx->GetOption(RSK_GANONS_TRIALS).Get();
+        int count;
+        if (trialMode == RO_GANONS_TRIALS_SKIP) {
+            count = 0;
+        } else if (trialMode == RO_GANONS_TRIALS_RANDOM_NUMBER) {
+            std::mt19937_64 trialRng(seed ^ 0x71A1C0FFEE5EED01ULL);
+            count = (int)(trialRng() % (uint64_t)(TK_MAX + 1));  // 0..6 inclusive
+        } else {  // RO_GANONS_TRIALS_SET_NUMBER (or out-of-range) -> the count slider
+            count = (int)ctx->GetOption(RSK_TRIAL_COUNT).Get();
+        }
+        if (count < 0) count = 0;
+        if (count > TK_MAX) count = TK_MAX;
+        // Require the first `count` trials in canonical TrialKey order (Light, Forest, Fire, ...).
+        // The SoH client mirrors this EXACT selection (savefile.cpp Randomizer_MultiShipApplyTrials),
+        // so both worlds require the trials the seed was generated for. This lockstep matters:
+        // different trials need different items, and the fill only guarantees the items for the
+        // trials it marks required — a divergent client subset could demand an unreachable item. A
+        // seed-randomized subset would need a byte-identical portable shuffle on both builds;
+        // first-N is the simplest selection that stays in lockstep without that fragility.
+        for (int i = 0; i < TK_MAX; ++i) ctx->GetTrial((TrialKey)i)->required = (i < count);
+        // Collapse to a concrete mode + count so the shipped settings describe the real gate.
+        ctx->SetOption(RSK_GANONS_TRIALS, RO_GANONS_TRIALS_SET_NUMBER);
+        ctx->SetOption(RSK_TRIAL_COUNT, (uint8_t)count);
+    }
+
     std::vector<std::shared_ptr<Rando::Logic>> worlds;
     worlds.push_back(logic);
     for (int w = 1; w < numWorlds; ++w) worlds.push_back(NewWorldLogic());

@@ -1,7 +1,7 @@
 // F-041 verification: Generator must emit exactly one Link's Pocket dungeon-reward placement per
 // world (same-world, owned locally), deterministically per seed. Standalone (engine is dep-free).
 #include "rando/Generator.h"
-#include "randomizerEnums.h"
+#include "rando/randomizerEnums.h"
 
 #include <cstdio>
 #include <map>

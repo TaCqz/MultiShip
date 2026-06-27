@@ -169,6 +169,24 @@ const std::vector<Setting>& CuratedSettings() {
                             "below. Which specific trials you need to complete will be random.\n\n"
                             "Random Number - A random number and set of trials will be required.",
                  .tab = TAB_LOGIC, .section = "Area Access" },
+        // The number of trials required when Ganon's Trials is "Set Number" (0-6). Ignored for
+        // Skip (0 trials) and Random Number (the generator rolls the count). Stored value == the
+        // count (sliderMin 0), which the generator reads and ships back resolved.
+        Setting{ .key = RSK_TRIAL_COUNT, .label = "Trial Count", .ui = Ui::Slider,
+                 .sliderMin = 0, .sliderMax = 6, .defaultValue = 6,
+                 .tooltip = "How many of Ganon's six trials are required when Ganon's Trials is set "
+                            "to \"Set Number\". Ignored for Skip and Random Number.",
+                 .tab = TAB_LOGIC, .section = "Area Access" },
+        // Rainbow Bridge "Stones" / "Medallions" counts. Not user-facing in this curated cut —
+        // fixed to "all" (3 spiritual stones / 6 medallions), which is what the modes imply — but
+        // shipped (hidden) so both the generator's logic AND the client's in-game bridge check
+        // read the same requirement.
+        Setting{ .key = RSK_RAINBOW_BRIDGE_STONE_COUNT, .label = "Bridge Stone Count",
+                 .ui = Ui::Slider, .sliderMin = 0, .sliderMax = 3, .defaultValue = 3,
+                 .tab = TAB_LOGIC, .section = "Area Access", .hidden = true },
+        Setting{ .key = RSK_RAINBOW_BRIDGE_MEDALLION_COUNT, .label = "Bridge Medallion Count",
+                 .ui = Ui::Slider, .sliderMin = 0, .sliderMax = 6, .defaultValue = 6,
+                 .tab = TAB_LOGIC, .section = "Area Access", .hidden = true },
 
         // ============================================================== Dungeons
         // -- Dungeon Items --

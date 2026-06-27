@@ -108,6 +108,29 @@ add_executable(MultiShipLinksPocketSmoke src/rando/_test/smoke_linkspocket.cpp)
 target_link_libraries(MultiShipLinksPocketSmoke PRIVATE multiship_rando)
 add_test(NAME links_pocket_smoke COMMAND MultiShipLinksPocketSmoke)
 
+# F-042 smoke test: the gCtx reset + the honored-settings override plumbing. Generating
+# twice is deterministic; a temporary probe key on the allowlist changes placement (the
+# override reaches the engine); and removing it reproduces the exact baseline (no cross-seed
+# state leak). Guards the divergence trap precondition for the per-setting phase (F-043+).
+add_executable(MultiShipOverridesSmoke src/rando/_test/smoke_overrides.cpp)
+target_link_libraries(MultiShipOverridesSmoke PRIVATE multiship_rando)
+add_test(NAME overrides_smoke COMMAND MultiShipOverridesSmoke)
+
+# F-043 (a) smoke test: the seven "area access" settings are honored end-to-end. Each value is
+# accepted + jointly beatable, generation stays deterministic, every value round-trips into the
+# shipped settings, and a normalized key (adult start -> Door of Time open) ships its EFFECTIVE
+# value (the client/engine lockstep write-back).
+add_executable(MultiShipAreaAccessSmoke src/rando/_test/smoke_area_access.cpp)
+target_link_libraries(MultiShipAreaAccessSmoke PRIVATE multiship_rando)
+add_test(NAME area_access_smoke COMMAND MultiShipAreaAccessSmoke)
+
+# F-043 (b) smoke test: Rainbow Bridge + Ganon's Trials. Trials resolve to the right required
+# count (Set Number / Skip / Random), the engine marks exactly that many trials required, both
+# bridge + trials seeds stay jointly beatable, and the resolved values round-trip into the seed.
+add_executable(MultiShipBridgeTrialsSmoke src/rando/_test/smoke_bridge_trials.cpp)
+target_link_libraries(MultiShipBridgeTrialsSmoke PRIVATE multiship_rando)
+add_test(NAME bridge_trials_smoke COMMAND MultiShipBridgeTrialsSmoke)
+
 # ------------------------------------------------------------------------------
 # Desktop GUI server (optional) — Dear ImGui (pinned) + SDL2 / SDL_Renderer
 # backends, built as a static lib. Skipped entirely when MULTISHIP_BUILD_GUI=OFF,

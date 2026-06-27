@@ -45,7 +45,22 @@ class Trial {
 
 class Context {
   public:
-    Context() { ApplyDefaultSettings(); }
+    Context() { ResetToDefaults(); }
+
+    // Re-baseline EVERY setting to its baked default, discarding any SetOption changes a
+    // prior generation left behind. RegionTable_Init calls this on each init so option
+    // overrides + the settings normalizations Fill applies cannot leak between seeds
+    // generated in one process (F-042). NOTE: ApplyDefaultSettings only WRITES the
+    // non-zero defaults (it assumes a freshly zeroed array, as on construction), so we
+    // must zero everything first; otherwise a key a prior seed set non-zero (e.g. an
+    // override, or a normalized songs/shops/age value) would survive. Dungeons (Master
+    // Quest) and trials are reset too so no engine state outlives a single generation.
+    void ResetToDefaults() {
+        options.fill(0);
+        dungeons.fill(DungeonInfo{});
+        trials.fill(Trial{});
+        ApplyDefaultSettings();
+    }
 
     OptionValue GetOption(RandomizerSettingKey key) const {
         return OptionValue(options[(size_t)key]);

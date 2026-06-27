@@ -46,6 +46,20 @@ struct Output {
 // "river-amber-otter-3f9a"). Same seed -> same id, so both players can confirm a match.
 std::string MakeSeedId(uint64_t seed);
 
+// The central 'honored-settings' allowlist: the RandomizerSettingKey values whose curated
+// option is fed into the engine as a REAL placement override. A curated setting NOT on
+// this list is carried to the output verbatim but kept at the engine's baked default for
+// placement — so a seed never assumes a world-state the client doesn't enforce yet (the
+// divergence trap). EMPTY in the foundation phase (pure baseline); per-setting tickets
+// (F-043+) add a key once that setting is honored end-to-end. See
+// docs/multiship-honored-settings.md for the contract and how to extend it.
+const std::vector<uint16_t>& HonoredSettings();
+
+// TEST SEAM ONLY — never called by production code. Temporarily replaces the honored
+// allowlist (e.g. a smoke test that puts one probe key on the list to prove the override
+// plumbing changes placement, then restores {}). Pass {} to restore the empty baseline.
+void SetHonoredSettingsForTest(const std::vector<uint16_t>& keys);
+
 // Progress sink: called from the SAME thread as Generate(), with a fraction in [0,1]
 // and a short transient stage label (copy it if you keep it). Lets a GUI show a
 // progress bar instead of appearing to hang. May be null.

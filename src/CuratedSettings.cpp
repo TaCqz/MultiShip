@@ -49,6 +49,14 @@ const std::vector<Setting>& CuratedSettings() {
                             "Starting as adult means you start with the Master Sword in your inventory.\n"
                             "The child option is forcefully set if it would conflict with other options.",
                  .tab = TAB_LOGIC, .section = "Logic" },
+        // Resolved Starting Age. The generator collapses Starting Age (Child/Adult/Random) to a
+        // concrete RO_AGE_* here and forces Door of Time open for an adult start (Fill.cpp). It is
+        // THE value the SoH client applies (linkAge/spawn/Master Sword), so it must be shipped:
+        // hidden + present in the curated set so the honored-settings write-back can overwrite it
+        // with the effective value. Default child mirrors the engine baked default.
+        Setting{ .key = RSK_SELECTED_STARTING_AGE, .label = "Selected Starting Age", .ui = Ui::Combo,
+                 .defaultValue = 0 /* RO_AGE_CHILD */, .tab = TAB_LOGIC, .section = "Logic",
+                 .hidden = true },
         Setting{ .key = RSK_FULL_WALLETS, .label = "Full Wallets", .ui = Ui::Checkbox,
                  .defaultValue = 0,
                  .tooltip = "Start with a full wallet. All wallet upgrades come filled with rupees.",
@@ -59,14 +67,16 @@ const std::vector<Setting>& CuratedSettings() {
                             "skip the sequence up until after meeting Zelda. Disables the ability to "
                             "shuffle Weird Egg.",
                  .tab = TAB_LOGIC, .section = "Logic" },
+        // "Shuffle" is intentionally omitted: the clean-room engine models masks as borrow
+        // events (market.cpp) and has no mask item-locations to shuffle into the pool, so it
+        // cannot honor Shuffle without divergence. Vanilla + Completed are honored end-to-end.
         Setting{ .key = RSK_MASK_QUEST, .label = "Mask Quest", .ui = Ui::Combo,
-                 .options = { { "Vanilla", 0 }, { "Completed", 1 }, { "Shuffle", 2 } },
+                 .options = { { "Vanilla", 0 }, { "Completed", 1 } },
                  .defaultValue = 0,
                  .tooltip = "How masks are acquired.\n"
                             "Vanilla - Mask trade quest.\n\n"
                             "Completed - Once the Happy Mask Shop is opened, all masks will be "
-                            "available to be borrowed.\n\n"
-                            "Shuffle - Happy Mask Shop never opens, masks are shuffled with rest of items.",
+                            "available to be borrowed.",
                  .tab = TAB_LOGIC, .section = "Logic" },
         Setting{ .key = RSK_SKIP_CHILD_STEALTH, .label = "Skip Child Stealth", .ui = Ui::Checkbox,
                  .defaultValue = 1 /* MultiShip override (base: Off) */,

@@ -219,6 +219,14 @@ Result Generate(uint64_t seed, int numWorlds, const std::vector<SettingOverride>
     // toggles now read directly in IsShuffled — the shipped value already matches the
     // pool either way, so they need no normalization (like cows/beehives).
     //
+    // Mask Quest (F-044): the engine models masks as borrow events (market.cpp), not as
+    // pooled item-locations, so it cannot honor "Shuffle" — there is nothing to shuffle the
+    // masks into. The curated UI no longer offers Shuffle; fold it to Vanilla defensively so
+    // a hand-crafted preset can't ship a value placement doesn't actually honor. Vanilla and
+    // Completed need no normalization — the borrow-event logic reads RSK_MASK_QUEST directly.
+    if (ctx->GetOption(RSK_MASK_QUEST).Get() == RO_MASK_QUEST_SHUFFLE)
+        ctx->SetOption(RSK_MASK_QUEST, RO_MASK_QUEST_VANILLA);
+    //
     // Starting Age: SoH's user-facing RSK_STARTING_AGE (Child/Adult/Random) is normally
     // resolved by FinalizeSettings into the concrete RSK_SELECTED_STARTING_AGE that the
     // world logic + the reachability search (Search::Run) actually read. The clean-room

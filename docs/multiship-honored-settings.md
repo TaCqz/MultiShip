@@ -70,6 +70,39 @@ it end-to-end:
 That's the only edit needed here — the override plumbing (`opts.settings` → filter by
 `HonoredSettings()` → `Fill::SettingOverride`) is already in place.
 
+### Currently honored
+
+The allowlist is no longer empty. As of the per-setting phase it holds:
+
+- **F-043 — Area Access (9):** `RSK_FOREST`, `RSK_KAK_GATE`, `RSK_DOOR_OF_TIME`,
+  `RSK_ZORAS_FOUNTAIN`, `RSK_SLEEPING_WATERFALL`, `RSK_JABU_OPEN`, `RSK_GERUDO_FORTRESS`,
+  `RSK_RAINBOW_BRIDGE` (+ `RSK_RAINBOW_BRIDGE_STONE_COUNT`,
+  `RSK_RAINBOW_BRIDGE_MEDALLION_COUNT`), `RSK_GANONS_TRIALS` (+ `RSK_TRIAL_COUNT`).
+- **F-044 — Tab 1 §1.1 "Logic" (7):** `RSK_STARTING_AGE` (+ `RSK_SELECTED_STARTING_AGE`),
+  `RSK_FULL_WALLETS`, `RSK_SKIP_CHILD_ZELDA`, `RSK_MASK_QUEST`, `RSK_SKIP_CHILD_STEALTH`,
+  `RSK_SKIP_EPONA_RACE`.
+
+F-044 notes (the write-back + normalization details that matter):
+
+- **Starting Age** is already modelled — `Fill.cpp` resolves `RSK_STARTING_AGE`
+  (Child/Adult/Random) into `RSK_SELECTED_STARTING_AGE` (root.cpp / Logic.cpp read it) and
+  forces Door of Time open for an adult start. `RSK_SELECTED_STARTING_AGE` is a **hidden
+  curated setting** so it is present in `sd.settings` for the overwrite-only write-back to
+  ship the *resolved* value — that is the value the SoH client applies (linkAge/spawn/Master
+  Sword).
+- **Full Wallets** has **no placement effect**: the engine does not model shop affordability
+  (`GetCheckPrice()` returns 0, so `price <= walletCap` is always true). It is honored
+  (shipped) only so the client grants the rupees; it is harmless on the allowlist.
+- **Skip Child Zelda / Skip Epona Race** are pure reachability reads (`root.cpp` makes the
+  Letter/Song-From-Impa/Malon checks root-reachable and frees Epona). No pool edit was
+  needed beyond shipping — the seed stays beatable under each (asserted in the smoke).
+- **Skip Child Stealth** has no reachability effect (Zelda is reachable either way); it is
+  shipped for the client's entrance remap only.
+- **Mask Quest** is honored for **Vanilla + Completed** only. The engine models masks as
+  borrow *events* (`market.cpp`) with **no mask item-locations**, so it cannot pool masks for
+  "Shuffle"; the curated UI drops that option and `Fill.cpp` folds a stray `Shuffle` value to
+  `Vanilla` defensively.
+
 ## Smoke test
 
 `MultiShipOverridesSmoke` (CMake target; `ctest -R overrides_smoke`,

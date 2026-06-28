@@ -131,6 +131,14 @@ add_executable(MultiShipBridgeTrialsSmoke src/rando/_test/smoke_bridge_trials.cp
 target_link_libraries(MultiShipBridgeTrialsSmoke PRIVATE multiship_rando)
 add_test(NAME bridge_trials_smoke COMMAND MultiShipBridgeTrialsSmoke)
 
+# F-044 smoke test: Tab 1 section 1.1 "Logic" (start-state + child-era settings). An adult start
+# resolves + ships Selected Starting Age = Adult and forces Door of Time open; Skip Child Zelda,
+# Mask Quest Completed, Full Wallets, Skip Child Stealth, Skip Epona Race each ship their value and
+# stay jointly beatable (alone and all together); Mask Quest Shuffle folds to Vanilla.
+add_executable(MultiShipLogicSettingsSmoke src/rando/_test/smoke_logic_settings.cpp)
+target_link_libraries(MultiShipLogicSettingsSmoke PRIVATE multiship_rando)
+add_test(NAME logic_settings_smoke COMMAND MultiShipLogicSettingsSmoke)
+
 # ------------------------------------------------------------------------------
 # Desktop GUI server (optional) — Dear ImGui (pinned) + SDL2 / SDL_Renderer
 # backends, built as a static lib. Skipped entirely when MULTISHIP_BUILD_GUI=OFF,

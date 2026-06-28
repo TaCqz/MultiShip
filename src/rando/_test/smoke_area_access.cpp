@@ -115,7 +115,8 @@ int main() {
     // --- 4. Write-back: a normalized honored key ships its EFFECTIVE value --------------
     // Door of Time picked Closed, but an adult start forces it open (Fill normalization). The
     // seed must ship Door of Time = Open so the client's world matches the generated logic.
-    // (Starting Age isn't on the production allowlist yet, so use the test seam to honor both.)
+    // (Both keys are on the production allowlist now — F-044 added Starting Age — but scope the
+    // test to exactly these two via the seam so it stays isolated from the rest of the list.)
     Generator::SetHonoredSettingsForTest({ (uint16_t)RSK_STARTING_AGE, (uint16_t)RSK_DOOR_OF_TIME });
     Generator::Options adultO = baseOpts();
     adultO.settings = {

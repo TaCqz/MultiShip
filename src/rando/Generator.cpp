@@ -69,6 +69,24 @@ std::vector<uint16_t> gHonoredSettings = {
     (uint16_t)RSK_RAINBOW_BRIDGE_MEDALLION_COUNT,
     (uint16_t)RSK_GANONS_TRIALS,
     (uint16_t)RSK_TRIAL_COUNT,
+    // F-044 — Tab 1 section 1.1 "Logic" (start-state + child-era settings). Each is honored
+    // end-to-end: the restored engine reads it (root.cpp gates Skip-Epona / Skip-Child-Zelda
+    // access and the adult-start Master Sword location; Logic.cpp + market.cpp gate the Mask
+    // Quest borrow events; Fill.cpp resolves Starting Age -> Selected Starting Age and forces
+    // Door of Time open for an adult start) AND the SoH client enforces it at save init via the
+    // shared MultiShip start-state grant path (age + Master Sword, full-wallet rupees, Zelda's
+    // Letter, completed masks) plus the live entrance/logic reads (Skip Child Stealth, Epona).
+    // RSK_SELECTED_STARTING_AGE is shipped (it is the value the client actually applies); it is
+    // a hidden curated setting so it is present in sd.settings for the write-back to overwrite.
+    // Full Wallets has no placement effect (the engine does not model shop affordability —
+    // GetCheckPrice is 0), so it is shipped for the client only; it is harmless on the allowlist.
+    (uint16_t)RSK_STARTING_AGE,
+    (uint16_t)RSK_SELECTED_STARTING_AGE,
+    (uint16_t)RSK_FULL_WALLETS,
+    (uint16_t)RSK_SKIP_CHILD_ZELDA,
+    (uint16_t)RSK_MASK_QUEST,
+    (uint16_t)RSK_SKIP_CHILD_STEALTH,
+    (uint16_t)RSK_SKIP_EPONA_RACE,
 };
 
 } // namespace

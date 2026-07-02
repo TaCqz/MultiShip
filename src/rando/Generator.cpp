@@ -87,6 +87,29 @@ std::vector<uint16_t> gHonoredSettings = {
     (uint16_t)RSK_MASK_QUEST,
     (uint16_t)RSK_SKIP_CHILD_STEALTH,
     (uint16_t)RSK_SKIP_EPONA_RACE,
+    // F-045 — Tab 2 dungeon items + key rings + Ganon's Boss Key. The restored engine's
+    // FEAT-5 restricted fill (Fill.cpp) places each dungeon item in its allowed zone for every
+    // mode (Own / Any Dungeon / Overworld / Anywhere), folds the win-condition Ganon-BK variants
+    // to Own Dungeon, grants Start-With items at save init (shipped as Start-With), and resolves
+    // key rings into a deterministic per-dungeon selection. The SoH client delivers each placed
+    // dungeon item to the correct dungeon, gates the doors / Ganon on the right key, and grants
+    // Start-With items via the shared start-state path — so placement may safely assume these.
+    // RSK_KEYRINGS_RANDOM_COUNT is shipped (hidden curated setting) so the Count-mode selection
+    // size reaches Fill via an override and round-trips into the output.
+    (uint16_t)RSK_SHUFFLE_MAPANDCOMPASS,
+    (uint16_t)RSK_KEYSANITY,
+    (uint16_t)RSK_BOSS_KEYSANITY,
+    (uint16_t)RSK_GANONS_BOSS_KEY,
+    (uint16_t)RSK_GERUDO_KEYS,
+    (uint16_t)RSK_KEYRINGS,
+    (uint16_t)RSK_KEYRINGS_RANDOM_COUNT,
+    // Shuffle Dungeon Rewards (End of Dungeons). The 9 spiritual stones + medallions are shuffled
+    // among the 9 dungeon-clear locations (the 8 boss blue-warps + Rauru's Chamber of Sages),
+    // own-world (Fill's ZR_REWARD_LOC restriction). End-of-Dungeons DISABLES Link's Pocket (the
+    // F-041 starting reward is skipped below), matching SoH (settings.cpp). The SoH client
+    // suppresses the vanilla boss/Rauru reward give and delivers the placed reward via the F-040
+    // flag-collection flow at each blue warp / the first adult transition.
+    (uint16_t)RSK_SHUFFLE_DUNGEON_REWARDS,
 };
 
 } // namespace
@@ -182,20 +205,27 @@ Output Generate(const Options& opts, const ProgressFn& progress) {
     for (int i = 0; i < n; ++i) sd.placements[junkSlots[i]].item = RG_ICE_TRAP;
     out.iceTraps = n;
 
-    // 5. Link's Pocket starting dungeon reward (F-041). The curated config fixes Link's Pocket to
-    //    a dungeon reward with "Any Reward" and Dungeon Rewards to End-of-Dungeons, so every world
-    //    starts with exactly ONE medallion or spiritual stone. The restored engine at baked
-    //    defaults does NOT emit a Link's Pocket placement (verified against the spoiler), so add it
-    //    here, deterministically per (seed, world). It is a normal SAME-WORLD placement at
-    //    RC_LINKS_POCKET (ownerWorld == locWorld) — so NO v3 schema change is needed — that the
-    //    client grants once at save init (not via the cross-world collect flow). Appended AFTER the
-    //    ice-trap step so the junk-slot selection above is byte-for-byte unchanged (rewards are
-    //    advancement, never junk, so they could never be ice-trapped anyway). End-of-Dungeons is
-    //    assumed for now; the conditional on the Dungeon Rewards setting arrives in the per-setting
-    //    phase.
-    {
-        // The nine dungeon rewards are contiguous in RandomizerGet: the three spiritual stones
-        // (Kokiri's Emerald .. Zora's Sapphire) then the six medallions (.. Light Medallion).
+    // 5. Link's Pocket starting dungeon reward (F-041). Every world starts with exactly one
+    //    "free" medallion / spiritual stone, granted by the client at save init.
+    if (ctx->GetOption(RSK_SHUFFLE_DUNGEON_REWARDS).Get() == RO_DUNGEON_REWARDS_END_OF_DUNGEON) {
+        // End-of-Dungeons: Rauru's Chamber-of-Sages gift is the "free" pocket reward (vanilla, the
+        // Light Medallion is handed over on the first adult transition without clearing a dungeon).
+        // Fill placed one reward at RC_GIFT_FROM_RAURU per world (own-world, via ZR_REWARD_LOC); just
+        // re-home it to RC_LINKS_POCKET so the client grants it at save init and the in-game Rauru
+        // gives nothing (its now-empty location is skipped by the delivery flow, which ignores a
+        // check whose placed item is NONE). The other eight rewards stay at the boss blue-warps, so
+        // all nine reward types are present once per world (1 free pocket + 8 earned) with no double.
+        for (int w = 0; w < numWorlds; ++w)
+            for (auto& p : sd.placements)
+                if (p.locWorld == w && p.loc == RC_GIFT_FROM_RAURU) {
+                    p.loc = RC_LINKS_POCKET;
+                    break;
+                }
+    } else {
+        // Vanilla dungeon rewards: the bosses keep their vanilla rewards, so synthesize one starting
+        // reward per world deterministically (no Fill reward placement exists to re-home). The nine
+        // rewards are contiguous in RandomizerGet (three stones then six medallions). Appended AFTER
+        // the ice-trap step so the junk-slot selection above is byte-for-byte unchanged.
         const int rewardBase = (int)RG_KOKIRI_EMERALD;
         const int rewardCount = (int)RG_LIGHT_MEDALLION - rewardBase + 1;  // 9
         for (int w = 0; w < numWorlds; ++w) {

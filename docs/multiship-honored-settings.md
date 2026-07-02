@@ -81,6 +81,51 @@ The allowlist is no longer empty. As of the per-setting phase it holds:
 - **F-044 — Tab 1 §1.1 "Logic" (7):** `RSK_STARTING_AGE` (+ `RSK_SELECTED_STARTING_AGE`),
   `RSK_FULL_WALLETS`, `RSK_SKIP_CHILD_ZELDA`, `RSK_MASK_QUEST`, `RSK_SKIP_CHILD_STEALTH`,
   `RSK_SKIP_EPONA_RACE`.
+- **F-045 — Tab 2 Dungeon Items + Key Rings + Dungeon Rewards (8):** `RSK_SHUFFLE_MAPANDCOMPASS`,
+  `RSK_KEYSANITY`, `RSK_BOSS_KEYSANITY`, `RSK_GANONS_BOSS_KEY`, `RSK_GERUDO_KEYS`,
+  `RSK_KEYRINGS` (+ `RSK_KEYRINGS_RANDOM_COUNT`), `RSK_SHUFFLE_DUNGEON_REWARDS`.
+
+F-045 notes (placement modes + the new pool work):
+
+- **Placement modes** (Own Dungeon / Any Dungeon / Overworld / Anywhere) were already modelled
+  by `Fill.cpp`'s FEAT-5 restricted fill; F-045 just adds the keys to the allowlist + the
+  effective write-back. The baked defaults in `Context.h` for the three location-mode settings
+  are set to **Vanilla** explicitly (they would otherwise be `0` == Start-With), so the empty-
+  override baseline keeps vanilla dungeon items exactly as before.
+- **Start-With** is now real (it previously folded to Vanilla): the item is removed from the pool
+  (its vacated location is filled 1:1 with junk), collected into every world's permanent
+  inventory so the fill's reachability assumes it, and shipped as Start-With so the SoH client
+  grants it at save init via the shared start-state path.
+- **Ganon's Boss Key** uses its own option set; the LACS / 100-GS win-condition variants (which
+  the engine can't model) fold to **Own Dungeon** and ship that effective value.
+- **Gerudo Fortress keys** (`RSK_GERUDO_KEYS`, four modes, no Own Dungeon) govern the four
+  Thieves' Hideout carpenter locations — categorized `LC_OTHER` but combat-gated, so they pool
+  cleanly for any non-vanilla mode (special-cased by vanilla item in `Fill::IsShuffled` + the
+  item-rule loop).
+- **Key Rings** is the only genuinely new engine work. `RSK_KEYRINGS` (Off / Random / Count)
+  resolves deterministically (from the seed, independent of the per-attempt RNG) to a set of
+  eligible dungeons — those whose small keys are actually shuffled (a ring is pointless under
+  Vanilla / Start-With keys; Gerudo Fortress is eligible only with non-vanilla fortress keys +
+  Normal carpenters). For each selected dungeon the pool gets **one `RG_*_KEY_RING`** (which
+  `Logic::CollectItem` already treats as 10 small keys) **plus junk** for the redundant key
+  slots — a 1:1 substitution, so the placement count is unchanged. The ring inherits the
+  placement zone of the small key it replaces. `RSK_KEYRINGS_RANDOM_COUNT` (Count-mode size) is
+  shipped so the selection size round-trips; the client derives the actual rings from the placed
+  `RG_*_KEY_RING` items, not from the setting.
+- **Shuffle Dungeon Rewards** (`RSK_SHUFFLE_DUNGEON_REWARDS`, End-of-Dungeons only) shuffles the
+  9 spiritual stones + medallions among the 9 dungeon-clear locations (8 boss blue-warps + Rauru),
+  own-world, via `Fill.cpp`'s `ZR_REWARD_LOC`. The Rauru placement is re-homed to Link's Pocket
+  (the "free" pocket reward) in `Generator.cpp` after the fill; the client suppresses the vanilla
+  boss/Rauru gives and delivers each placed reward via the F-040 flag-collection flow.
+  - **Closed-Door-of-Time guarantee.** With a closed Door of Time the three spiritual stones gate
+    adult access (`temple_of_time.cpp` opens the door only at `StoneCount()==3`), so every stone
+    must be obtainable as child — i.e. at one of the three CHILD-dungeon boss rewards (Queen Gohma
+    / King Dodongo / Barinade), the only child-reachable reward locs (exactly three). Because all
+    nine rewards share `ZR_REWARD_LOC`, the fill orders the **stones before the medallions** (a
+    medallion is never an adult-access gate) so the stones claim the child locs deterministically;
+    otherwise a medallion could steal a child loc and strand a stone behind an adult dungeon,
+    leaning on the 40-attempt retry to recover (measured pre-fix: ~37/40 attempts, occasionally
+    exhausting into a LOCKED seed). Guarded by `smoke_dot_closed_rewards`.
 
 F-044 notes (the write-back + normalization details that matter):
 

@@ -139,6 +139,37 @@ add_executable(MultiShipLogicSettingsSmoke src/rando/_test/smoke_logic_settings.
 target_link_libraries(MultiShipLogicSettingsSmoke PRIVATE multiship_rando)
 add_test(NAME logic_settings_smoke COMMAND MultiShipLogicSettingsSmoke)
 
+# F-045 (a) smoke test: dungeon-item placement. Maps & compasses / small keys / boss keys / Ganon's
+# Boss Key / Gerudo Fortress keys honor each mode — Own Dungeon keeps an item in its home dungeon
+# (own world), Anywhere lets it escape, Vanilla keeps it out of the pool, Start-With grants it at
+# init (absent from the pool); every seed stays jointly beatable and ships the effective value.
+add_executable(MultiShipDungeonItemsSmoke src/rando/_test/smoke_dungeon_items.cpp)
+target_link_libraries(MultiShipDungeonItemsSmoke PRIVATE multiship_rando)
+add_test(NAME dungeon_items_smoke COMMAND MultiShipDungeonItemsSmoke)
+
+# F-045 (b) smoke test: Key Rings. Off keeps individual keys; Count/Random convert a deterministic
+# set of dungeons to one ring each (per world) with no loose keys, as a 1:1 pool substitution that
+# leaves the placement count unchanged and the seed beatable; rings have no effect under Vanilla keys.
+add_executable(MultiShipKeyringsSmoke src/rando/_test/smoke_keyrings.cpp)
+target_link_libraries(MultiShipKeyringsSmoke PRIVATE multiship_rando)
+add_test(NAME keyrings_smoke COMMAND MultiShipKeyringsSmoke)
+
+# F-045 follow-up smoke test: Shuffle Dungeon Rewards = End of Dungeons. The 9 rewards shuffle
+# among the 9 dungeon-clear locations (own-world), exactly one of each per world; the Triforce is
+# never a reward and Link's Pocket is disabled; Vanilla keeps rewards out of the pool + the F-041
+# Link's Pocket starting reward.
+add_executable(MultiShipDungeonRewardsSmoke src/rando/_test/smoke_dungeon_rewards.cpp)
+target_link_libraries(MultiShipDungeonRewardsSmoke PRIVATE multiship_rando)
+add_test(NAME dungeon_rewards_smoke COMMAND MultiShipDungeonRewardsSmoke)
+
+# F-045 follow-up regression: closed Door of Time (the curated default) + End-of-Dungeons rewards
+# must stay jointly beatable. With a closed door the three spiritual stones gate adult access, so
+# they must be reachable as child; this guards the fill order so a medallion can never steal a
+# child reward loc and strand a stone behind an adult dungeon. Runs many seeds.
+add_executable(MultiShipDotClosedRewardsSmoke src/rando/_test/smoke_dot_closed_rewards.cpp)
+target_link_libraries(MultiShipDotClosedRewardsSmoke PRIVATE multiship_rando)
+add_test(NAME dot_closed_rewards_smoke COMMAND MultiShipDotClosedRewardsSmoke)
+
 # ------------------------------------------------------------------------------
 # Desktop GUI server (optional) — Dear ImGui (pinned) + SDL2 / SDL_Renderer
 # backends, built as a static lib. Skipped entirely when MULTISHIP_BUILD_GUI=OFF,

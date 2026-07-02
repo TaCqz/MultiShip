@@ -277,6 +277,17 @@ const std::vector<Setting>& CuratedSettings() {
                             "can be selected by Random or Count will be 9. Otherwise, the maximum amount "
                             "of Key Rings will be 8.",
                  .tab = TAB_DUNGEONS, .section = "Key Rings" },
+        // The number of dungeons that become key rings when Key Rings is "Count" (0-9). Ignored
+        // for Off and Random (the generator rolls a count for Random). Stored value == the count
+        // (sliderMin 0); the generator reads it, clamps to the eligible dungeon count, and ships
+        // it back resolved so the selection size is reproducible. Only as many dungeons as have
+        // their keys shuffled can become key rings, so the effective max is 8 (or 9 with
+        // non-vanilla Gerudo Fortress keys + Normal carpenters).
+        Setting{ .key = RSK_KEYRINGS_RANDOM_COUNT, .label = "Key Ring Count", .ui = Ui::Slider,
+                 .sliderMin = 0, .sliderMax = 9, .defaultValue = 4,
+                 .tooltip = "How many randomly selected dungeons become key rings when Key Rings "
+                            "is set to \"Count\". Ignored for Off and Random.",
+                 .tab = TAB_DUNGEONS, .section = "Key Rings" },
 
         // ============================================================== Shuffles
         // -- Shuffle Items --

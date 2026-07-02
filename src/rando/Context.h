@@ -88,6 +88,14 @@ class Context {
         options[(size_t)RSK_GERUDO_FORTRESS]     = RO_GF_CARPENTERS_FAST;
         options[(size_t)RSK_SELECTED_STARTING_AGE] = RO_AGE_CHILD;
         options[(size_t)RSK_RAINBOW_BRIDGE]      = RO_BRIDGE_GREG;
+        // Dungeon items (F-045). These keys default to 0 otherwise, which is
+        // RO_DUNGEON_ITEM_LOC_STARTWITH for the location-mode settings — the baseline must be
+        // Vanilla (vanilla dungeon items, the documented foundation state), so set it explicitly.
+        // Ganon's Boss Key / Gerudo Fortress keys / Key Rings already baseline to 0 (Vanilla /
+        // Vanilla / Off respectively), so no entry is needed for them.
+        options[(size_t)RSK_SHUFFLE_MAPANDCOMPASS] = RO_DUNGEON_ITEM_LOC_VANILLA;
+        options[(size_t)RSK_KEYSANITY]             = RO_DUNGEON_ITEM_LOC_VANILLA;
+        options[(size_t)RSK_BOSS_KEYSANITY]        = RO_DUNGEON_ITEM_LOC_VANILLA;
         // Count-based end-game gates (SoH settings.cpp defaults). These keys default to 0
         // otherwise, which would make any count-based bridge/LACS mode satisfiable from the
         // start state (0 items >= 0) — a trivially-beatable seed. Logic::CanBuildRainbowBridge

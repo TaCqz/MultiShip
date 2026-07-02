@@ -28,6 +28,12 @@ struct ItemRule { ZoneRule zr; uint8_t home; };  // home = the item's own Dungeo
 // via tokensanity) are added when their setting is on. Reads the global `ctx`, so it
 // must be called after RegionTable_Init + settings overrides are applied.
 bool IsShuffled(const LocMeta& L) {
+    // Gerudo Fortress (Thieves' Hideout) small keys are categorized LC_OTHER but governed by
+    // their own setting (the four carpenter locations are combat-gated, not key-gated, so they
+    // pool cleanly). Shuffle them for any non-vanilla fortress-key mode. Checked before the
+    // category switch since LC_OTHER otherwise returns false.
+    if (L.vanilla == RG_GERUDO_FORTRESS_SMALL_KEY)
+        return ctx->GetOption(RSK_GERUDO_KEYS).Get() != RO_GERUDO_KEYS_VANILLA;
     switch (L.category) {
         case LC_STANDARD:
             // Three otherwise-standard locations are gated by item-specific toggles. With
@@ -105,6 +111,9 @@ bool IsShuffled(const LocMeta& L) {
         case LC_GANON_BOSS_KEY:
             return ctx->GetOption(RSK_GANONS_BOSS_KEY).Get() != RO_GANON_BOSS_KEY_VANILLA;
         case LC_DUNGEON_REWARD:
+            // RC_GANON's "reward" is the Triforce (the win), never a shuffled dungeon reward — keep
+            // it out of the pool so it can't displace a real reward or land at a boss.
+            if (L.vanilla == RG_TRIFORCE) return false;
             return ctx->GetOption(RSK_SHUFFLE_DUNGEON_REWARDS).Get() != RO_DUNGEON_REWARDS_VANILLA;
         default:
             return false;  // LC_OTHER + sanities not yet pooled by the engine
@@ -118,8 +127,14 @@ int VerifyReachable(const std::vector<Placement>& placements, int numWorlds,
                     std::vector<std::shared_ptr<Rando::Logic>>& worlds,
                     const std::unordered_map<int, RandomizerGet>& vanillaOf,
                     const std::unordered_set<int>& shuffledSet,
+                    const std::vector<RandomizerGet>& startWith,
                     std::unordered_set<long long>& reachedOut) {
     for (auto& w : worlds) w->Reset();
+    // Start-With dungeon items are held by every world from the beginning (granted at save init
+    // on the client). They are not placed, so seed each world's inventory with them before the
+    // forward sweep or their dungeons would read as unreachable. See Generate().
+    for (auto& w : worlds)
+        for (RandomizerGet rg : startWith) w->CollectItem(rg, true);
     std::unordered_map<long long, std::pair<RandomizerGet, int>> placed;
     for (const auto& p : placements) placed[Key(p.locWorld, p.loc)] = { p.item, p.itemWorld };
 
@@ -166,23 +181,15 @@ Result Generate(uint64_t seed, int numWorlds, const std::vector<SettingOverride>
     // derives its checks from these — a mismatch would leave checks unplaced). Remove an
     // entry when the engine learns to pool it.
     //
-    // FEAT-5 dungeon items: the engine supports Vanilla + the placement-zone modes (Own/Any
-    // Dungeon, Overworld, Anywhere) via the restricted fill below. Fold the modes it does
-    // NOT model to the nearest supported one so the pool matches the shipped settings:
-    // Start-With -> Vanilla (no start-grant), and the Ganon-BK LACS/100-GS win-condition
-    // variants -> Own Dungeon (the boss key stays inside Ganon's Castle).
-    auto foldStartWith = [&](RandomizerSettingKey k) {
-        if (ctx->GetOption(k).Get() == RO_DUNGEON_ITEM_LOC_STARTWITH)
-            ctx->SetOption(k, RO_DUNGEON_ITEM_LOC_VANILLA);
-    };
-    foldStartWith(RSK_KEYSANITY);
-    foldStartWith(RSK_BOSS_KEYSANITY);
-    foldStartWith(RSK_SHUFFLE_MAPANDCOMPASS);
+    // FEAT-5 dungeon items (F-045): the engine supports Vanilla, the placement-zone modes
+    // (Own/Any Dungeon, Overworld, Anywhere) via the restricted fill below, AND Start-With (the
+    // item is removed from the pool, granted to its owner from the start so reachability assumes
+    // it, and shipped as Start-With so the SoH client grants it at save init). The only modes it
+    // cannot model are Ganon's-Boss-Key win-condition variants (LACS / 100 GS), so fold those to
+    // Own Dungeon (the boss key stays inside Ganon's Castle) and ship that effective value.
     {
         uint8_t g = ctx->GetOption(RSK_GANONS_BOSS_KEY).Get();
-        if (g == RO_GANON_BOSS_KEY_STARTWITH)
-            ctx->SetOption(RSK_GANONS_BOSS_KEY, RO_GANON_BOSS_KEY_VANILLA);
-        else if (g >= RO_GANON_BOSS_KEY_LACS_VANILLA)  // LACS-* + 100 GS (values 6..12)
+        if (g >= RO_GANON_BOSS_KEY_LACS_VANILLA)  // LACS-* + 100 GS (values 6..12)
             ctx->SetOption(RSK_GANONS_BOSS_KEY, RO_GANON_BOSS_KEY_OWN_DUNGEON);
     }
     // Scrubsanity IS supported: collapse One-Time -> All (the engine pools all scrubs).
@@ -313,7 +320,9 @@ Result Generate(uint64_t seed, int numWorlds, const std::vector<SettingOverride>
     for (int i = 0; i < kLocationCount; ++i) {
         const auto& L = kLocations[i];
         if ((int)L.rc < RCM) locZone[(int)L.rc] = L.zone;
-        if (L.category == LC_DUNGEON_REWARD) rewardLocSet.insert((int)L.rc);
+        // RC_GANON (vanilla Triforce) is not a reward sink — exclude it so End-of-Dungeons rewards
+        // only ever land at the 8 boss blue-warps + Rauru's Chamber of Sages (9 locs, 9 rewards).
+        if (L.category == LC_DUNGEON_REWARD && L.vanilla != RG_TRIFORCE) rewardLocSet.insert((int)L.rc);
     }
     auto dlocRule = [](uint8_t m) -> ZoneRule {
         switch (m) {
@@ -340,25 +349,108 @@ Result Generate(uint64_t seed, int numWorlds, const std::vector<SettingOverride>
             default:                                return ZR_NONE;  // Anywhere
         }
     };
-    uint8_t mKeys = ctx->GetOption(RSK_KEYSANITY).Get();
-    uint8_t mBoss = ctx->GetOption(RSK_BOSS_KEYSANITY).Get();
-    uint8_t mMC   = ctx->GetOption(RSK_SHUFFLE_MAPANDCOMPASS).Get();
-    uint8_t mGBK  = ctx->GetOption(RSK_GANONS_BOSS_KEY).Get();
-    uint8_t mRew  = ctx->GetOption(RSK_SHUFFLE_DUNGEON_REWARDS).Get();
+    // Gerudo Fortress (Thieves' Hideout) small keys have their own four-mode setting (no Own
+    // Dungeon — the fortress isn't a single dungeon zone). Vanilla isn't pooled.
+    auto gerudoRule = [](uint8_t m) -> ZoneRule {
+        switch (m) {
+            case RO_GERUDO_KEYS_ANY_DUNGEON: return ZR_ANY_DUNGEON;
+            case RO_GERUDO_KEYS_OVERWORLD:   return ZR_OVERWORLD;
+            default:                         return ZR_NONE;  // Anywhere
+        }
+    };
+    uint8_t mKeys   = ctx->GetOption(RSK_KEYSANITY).Get();
+    uint8_t mBoss   = ctx->GetOption(RSK_BOSS_KEYSANITY).Get();
+    uint8_t mMC     = ctx->GetOption(RSK_SHUFFLE_MAPANDCOMPASS).Get();
+    uint8_t mGBK    = ctx->GetOption(RSK_GANONS_BOSS_KEY).Get();
+    uint8_t mRew    = ctx->GetOption(RSK_SHUFFLE_DUNGEON_REWARDS).Get();
+    uint8_t mGerudo = ctx->GetOption(RSK_GERUDO_KEYS).Get();
+    // Items granted from the start (Start-With modes). They are removed from the pool (their
+    // vacated location is filled 1:1 with junk) and collected into every world's permanent
+    // inventory so the fill's reachability assumes them; the value ships as Start-With so the
+    // SoH client grants them at save init. Gerudo Fortress keys have no Start-With mode.
+    std::unordered_set<int> startWith;
     std::unordered_map<int, ItemRule> itemRule;  // rg -> restriction (constrained items only)
     for (int i = 0; i < kLocationCount; ++i) {
         const auto& L = kLocations[i];
         ZoneRule zr = ZR_NONE;
-        switch (L.category) {
-            case LC_SMALL_KEY:            zr = dlocRule(mKeys); break;
-            case LC_BOSS_KEY:             zr = dlocRule(mBoss); break;
-            case LC_MAP: case LC_COMPASS: zr = dlocRule(mMC);   break;
-            case LC_GANON_BOSS_KEY:       zr = gbkRule(mGBK);   break;
+        bool isStartWith = false;
+        if (L.vanilla == RG_GERUDO_FORTRESS_SMALL_KEY) {
+            zr = gerudoRule(mGerudo);
+        } else switch (L.category) {
+            case LC_SMALL_KEY:            isStartWith = (mKeys == RO_DUNGEON_ITEM_LOC_STARTWITH); zr = dlocRule(mKeys); break;
+            case LC_BOSS_KEY:             isStartWith = (mBoss == RO_DUNGEON_ITEM_LOC_STARTWITH); zr = dlocRule(mBoss); break;
+            case LC_MAP: case LC_COMPASS: isStartWith = (mMC   == RO_DUNGEON_ITEM_LOC_STARTWITH); zr = dlocRule(mMC);   break;
+            case LC_GANON_BOSS_KEY:       isStartWith = (mGBK  == RO_GANON_BOSS_KEY_STARTWITH);    zr = gbkRule(mGBK);   break;
             case LC_DUNGEON_REWARD:       zr = rewardRule(mRew); break;
             default: continue;
         }
-        if (zr != ZR_NONE) itemRule[(int)L.vanilla] = { zr, L.zone };
+        if (isStartWith)         startWith.insert((int)L.vanilla);
+        else if (zr != ZR_NONE)  itemRule[(int)L.vanilla] = { zr, L.zone };
     }
+
+    // Key Rings (F-045). A key-ring replaces a dungeon's individual small keys with a single
+    // item that grants ALL of that dungeon's keys (Logic::CollectItem maps RG_*_KEY_RING to a
+    // small-key count of 10). Only dungeons whose small keys are actually shuffled are eligible
+    // (a ring "has no effect" under Vanilla / Start-With keys); Gerudo Fortress is eligible only
+    // with non-vanilla fortress keys AND Normal carpenters. The selected dungeons are resolved
+    // deterministically from the seed (independent of the per-attempt fill RNG) so the pool is
+    // stable; the pool loop below then emits one ring (+ junk for the redundant slots) per
+    // selected dungeon, and the ring inherits its small key's placement zone.
+    struct KeyringDungeon { RandomizerGet smallKey; RandomizerGet ring; bool gerudoFortress; };
+    static const KeyringDungeon kKeyringDungeons[] = {
+        { RG_FOREST_TEMPLE_SMALL_KEY,          RG_FOREST_TEMPLE_KEY_RING,          false },
+        { RG_FIRE_TEMPLE_SMALL_KEY,            RG_FIRE_TEMPLE_KEY_RING,            false },
+        { RG_WATER_TEMPLE_SMALL_KEY,           RG_WATER_TEMPLE_KEY_RING,           false },
+        { RG_SPIRIT_TEMPLE_SMALL_KEY,          RG_SPIRIT_TEMPLE_KEY_RING,          false },
+        { RG_SHADOW_TEMPLE_SMALL_KEY,          RG_SHADOW_TEMPLE_KEY_RING,          false },
+        { RG_BOTTOM_OF_THE_WELL_SMALL_KEY,     RG_BOTTOM_OF_THE_WELL_KEY_RING,     false },
+        { RG_GERUDO_TRAINING_GROUND_SMALL_KEY, RG_GERUDO_TRAINING_GROUND_KEY_RING, false },
+        { RG_GANONS_CASTLE_SMALL_KEY,          RG_GANONS_CASTLE_KEY_RING,          false },
+        { RG_GERUDO_FORTRESS_SMALL_KEY,        RG_GERUDO_FORTRESS_KEY_RING,        true  },
+    };
+    const bool keysShuffled = (mKeys != RO_DUNGEON_ITEM_LOC_VANILLA &&
+                               mKeys != RO_DUNGEON_ITEM_LOC_STARTWITH);
+    const bool gerudoShuffled = (mGerudo != RO_GERUDO_KEYS_VANILLA);
+    const bool carpentersNormal = ctx->GetOption(RSK_GERUDO_FORTRESS).Is(RO_GF_CARPENTERS_NORMAL);
+    std::unordered_map<int, int> keyringItemOf;  // smallKeyRG -> ringRG for selected dungeons
+    {
+        std::vector<int> eligible;
+        for (int i = 0; i < (int)(sizeof(kKeyringDungeons) / sizeof(kKeyringDungeons[0])); ++i) {
+            const auto& d = kKeyringDungeons[i];
+            bool ok = d.gerudoFortress ? (gerudoShuffled && carpentersNormal) : keysShuffled;
+            if (ok) eligible.push_back(i);
+        }
+        uint8_t krMode = ctx->GetOption(RSK_KEYRINGS).Get();
+        int krCount = 0;
+        if (krMode != RO_KEYRINGS_OFF && !eligible.empty()) {
+            std::mt19937_64 krRng(seed ^ 0x9C0FFEE5B16B00B5ULL);  // distinct salt, seed-derived
+            std::shuffle(eligible.begin(), eligible.end(), krRng);
+            if (krMode == RO_KEYRINGS_RANDOM)
+                krCount = (int)(krRng() % (uint64_t)(eligible.size() + 1));  // 0..all eligible
+            else                                                              // Count (or Selection)
+                krCount = (int)ctx->GetOption(RSK_KEYRINGS_RANDOM_COUNT).Get();
+            if (krCount < 0) krCount = 0;
+            if (krCount > (int)eligible.size()) krCount = (int)eligible.size();
+            for (int i = 0; i < krCount; ++i) {
+                const auto& d = kKeyringDungeons[eligible[i]];
+                keyringItemOf[(int)d.smallKey] = (int)d.ring;
+            }
+        }
+        // A ring inherits the placement zone of the small key it replaces (none under Anywhere).
+        for (const auto& kv : keyringItemOf) {
+            auto it = itemRule.find(kv.first);
+            if (it != itemRule.end()) itemRule[kv.second] = it->second;
+        }
+        // Ship a concrete, reproducible selection size; collapse non-Off modes to Count. The
+        // client derives the actual rings from the placed RG_*_KEY_RING items, not from these.
+        ctx->SetOption(RSK_KEYRINGS_RANDOM_COUNT, (uint8_t)krCount);
+        if (krMode != RO_KEYRINGS_OFF) ctx->SetOption(RSK_KEYRINGS, RO_KEYRINGS_COUNT);
+    }
+    // Stable, deterministic order for the per-world start-of-fill grant (CollectItem is
+    // order-independent, but a fixed order keeps the fill reproducible across std-lib builds).
+    std::vector<RandomizerGet> startWithList;
+    for (int v : startWith) startWithList.push_back((RandomizerGet)v);
+    std::sort(startWithList.begin(), startWithList.end());
     auto ruleFor = [&](RandomizerGet rg) -> const ItemRule* {
         auto it = itemRule.find((int)rg);
         return it == itemRule.end() ? nullptr : &it->second;
@@ -394,14 +486,33 @@ Result Generate(uint64_t seed, int numWorlds, const std::vector<SettingOverride>
         std::snprintf(stage, sizeof(stage), "Attempt %d - preparing item pool...", attempt + 1);
         report(0.04f, stage);
         for (auto& w : worlds) w->Reset();
+        // Start-With dungeon items: held by every world from the start (not placed). Collect them
+        // now so they persist through the whole fill (the pool below never re-adds them, so the
+        // assumed-fill removals can't strip them).
+        for (auto& w : worlds)
+            for (RandomizerGet rg : startWithList) w->CollectItem(rg, true);
         std::mt19937_64 rng(seed + (uint64_t)attempt * 0x9E3779B97F4A7C15ULL);
 
         std::vector<PoolItemInternal> progression, junk;
-        for (int w = 0; w < numWorlds; ++w)
+        for (int w = 0; w < numWorlds; ++w) {
+            std::unordered_set<int> ringEmitted;  // small-key RG whose ring is already in this world's pool
             for (RandomizerCheck rc : shuffledLocs) {
                 RandomizerGet it = vanillaOf[(int)rc];
+                if (startWith.count((int)it)) {        // granted at start -> slot gets junk instead
+                    junk.push_back({ RG_RECOVERY_HEART, w });
+                    continue;
+                }
+                auto kr = keyringItemOf.find((int)it);  // a keyring dungeon's small key
+                if (kr != keyringItemOf.end()) {
+                    if (ringEmitted.insert((int)it).second)
+                        progression.push_back({ (RandomizerGet)kr->second, w });  // the single key ring
+                    else
+                        junk.push_back({ RG_RECOVERY_HEART, w });                 // redundant key -> junk
+                    continue;
+                }
                 (adv.count((int)it) ? progression : junk).push_back({ it, w });
             }
+        }
         // Assumed inventory per world = ALL its shuffled progression (removed as placed).
         for (const auto& p : progression) worlds[p.owner]->CollectItem(p.item, true);
 
@@ -412,17 +523,32 @@ Result Generate(uint64_t seed, int numWorlds, const std::vector<SettingOverride>
         std::vector<Placement> placements;
         std::unordered_map<long long, std::pair<RandomizerGet, int>> placedSoFar;
 
-        // Constraint tightness (fewer legal slots = smaller = place earlier so the scarce
-        // zones aren't starved). Reward-locs are scarcest, then own-dungeon, then any/ow.
+        // Within the scarce reward-loc zone the spiritual stones (Kokiri Emerald / Goron Ruby /
+        // Zora Sapphire) must be placed BEFORE the medallions. With a closed Door of Time the stones
+        // gate adult access (temple_of_time.cpp opens the door only at StoneCount()==3), so for the
+        // End-of-Dungeons reward shuffle each stone must land at one of the three CHILD-dungeon boss
+        // rewards (Queen Gohma / King Dodongo / Barinade) — the only reward locations reachable as
+        // child, and there are exactly three. A medallion is never an adult-access gate, so if one
+        // claimed a child reward loc first a stone would strand behind an adult dungeon; the assumed
+        // fill would then lean on the 40-attempt retry to recover, which can EXHAUST and ship a
+        // LOCKED seed (measured: ~37 of 40 attempts even when it does succeed). Ordering stones
+        // first lets them take the child reward locs deterministically. Harmless for every other
+        // Door-of-Time mode (the stones just take reward locs first, all reachable) and for the
+        // other reward zones (Own/Any-Dungeon/Overworld/Anywhere have abundant child locations).
+        auto isStone = [](RandomizerGet rg) {
+            return rg == RG_KOKIRI_EMERALD || rg == RG_GORON_RUBY || rg == RG_ZORA_SAPPHIRE;
+        };
+        // Constraint tightness (fewer legal slots = smaller = place earlier so the scarce zones
+        // aren't starved): stone rewards, then other rewards, then own-dungeon, then any/ow.
         auto tightness = [&](RandomizerGet rg) -> int {
             const ItemRule* ir = ruleFor(rg);
-            if (!ir) return 4;
+            if (!ir) return 5;
             switch (ir->zr) {
-                case ZR_REWARD_LOC:  return 0;
-                case ZR_OWN:         return 1;
-                case ZR_ANY_DUNGEON: return 2;
-                case ZR_OVERWORLD:   return 3;
-                default:             return 4;
+                case ZR_REWARD_LOC:  return isStone(rg) ? 0 : 1;  // stones before medallions
+                case ZR_OWN:         return 2;
+                case ZR_ANY_DUNGEON: return 3;
+                case ZR_OVERWORLD:   return 4;
+                default:             return 5;
             }
         };
         auto byTightness = [&](const PoolItemInternal& a, const PoolItemInternal& b) {
@@ -535,7 +661,8 @@ Result Generate(uint64_t seed, int numWorlds, const std::vector<SettingOverride>
         std::snprintf(stage, sizeof(stage), "Attempt %d - verifying reachability...", attempt + 1);
         report(0.92f, stage);
         std::unordered_set<long long> reachedKeys;
-        int reached = VerifyReachable(placements, numWorlds, worlds, vanillaOf, shuffledSet, reachedKeys);
+        int reached = VerifyReachable(placements, numWorlds, worlds, vanillaOf, shuffledSet,
+                                      startWithList, reachedKeys);
         int stranded = 0;
         for (const auto& pl : placements)
             if (adv.count((int)pl.item) && !reachedKeys.count(Key(pl.locWorld, pl.loc))) stranded++;
